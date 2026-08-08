@@ -1,0 +1,12 @@
+{
+  "servers": {
+    "job-memory": {
+      "type": "stdio",
+      "command": "python",
+      "args": [
+        "C:\\codebase\\scrapper\\run_server.py"
+      ]
+    }
+  },
+  "inputs": []
+}

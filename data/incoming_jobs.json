@@ -1,0 +1,30 @@
+{
+  "jobs": [
+    {
+      "company": "OpenAI",
+      "title": "Senior AI Engineer",
+      "url": "https://openai.com/careers/senior-ai-engineer",
+      "description": "Build production AI agent infrastructure and LLM platforms.",
+      "location": "Remote",
+      "source": "gpt-job-search",
+      "required_skills": ["python", "machine learning"],
+      "preferred_skills": ["llm", "distributed systems"],
+      "remote_status": true,
+      "salary": "$220k",
+      "posted_date": "2026-08-04"
+    },
+    {
+      "company": "DeepMind",
+      "title": "Machine Learning Engineer",
+      "url": "https://deepmind.com/careers/ml-engineer",
+      "description": "Research and build scalable machine learning systems.",
+      "location": "London",
+      "source": "gpt-job-search",
+      "required_skills": ["python", "deep learning"],
+      "preferred_skills": ["research", "ai"],
+      "remote_status": false,
+      "salary": "$180k",
+      "posted_date": "2026-08-04"
+    }
+  ]
+}

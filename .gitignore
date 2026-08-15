@@ -1,1 +1,29 @@
+# Python
 .venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+jobs_memory.db
+
+# Node / Next.js
+remote_mcp/node_modules/
+remote_mcp/.next/
+remote_mcp/out/
+remote_mcp/coverage/
+remote_mcp/.turbo/
+
+# Env / secrets
+.env
+.env.local
+.env.*.local
+remote_mcp/.env
+remote_mcp/.env.local
+*.pem
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/mcp.json

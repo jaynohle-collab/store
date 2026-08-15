@@ -12,6 +12,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   location TEXT,
   source TEXT,
   description TEXT,
+  description_hash TEXT,
   required_skills JSONB NOT NULL DEFAULT '[]'::jsonb,
   preferred_skills JSONB NOT NULL DEFAULT '[]'::jsonb,
   remote_status TEXT,
@@ -21,16 +22,15 @@ CREATE TABLE IF NOT EXISTS jobs (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_jobs_url ON jobs (url);
-CREATE INDEX IF NOT EXISTS idx_jobs_company ON jobs (company);
-CREATE INDEX IF NOT EXISTS idx_jobs_title ON jobs (title);
-CREATE INDEX IF NOT EXISTS idx_jobs_posted_date ON jobs (posted_date);
-CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs (created_at DESC);
-
--- Compatibility: if an older PoC table exists without newer columns, add them safely.
+-- Add every canonical column before creating indexes. This ordering makes the
+-- migration safe when the Neon PoC already has a partial jobs table.
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS company TEXT;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS title TEXT;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS url TEXT;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS location TEXT;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS source TEXT;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS description TEXT;
+ALTER TABLE jobs ADD COLUMN IF NOT EXISTS description_hash TEXT;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS required_skills JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS preferred_skills JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS remote_status TEXT;
@@ -38,3 +38,9 @@ ALTER TABLE jobs ADD COLUMN IF NOT EXISTS salary TEXT;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS posted_date TIMESTAMPTZ;
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 ALTER TABLE jobs ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+
+CREATE INDEX IF NOT EXISTS idx_jobs_url ON jobs (url);
+CREATE INDEX IF NOT EXISTS idx_jobs_company ON jobs (company);
+CREATE INDEX IF NOT EXISTS idx_jobs_title ON jobs (title);
+CREATE INDEX IF NOT EXISTS idx_jobs_posted_date ON jobs (posted_date);
+CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs (created_at DESC);

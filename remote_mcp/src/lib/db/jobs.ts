@@ -3,6 +3,10 @@ import { z } from "zod";
 import { getSql } from "./client";
 
 const skillsSchema = z.array(z.string()).default([]);
+export const postedDateSchema = z.union([
+  z.iso.date(),
+  z.iso.datetime({ offset: true }),
+]);
 
 export const saveJobInputSchema = z.object({
   company: z.string().min(1).max(512),
@@ -11,11 +15,12 @@ export const saveJobInputSchema = z.object({
   location: z.string().max(512).optional(),
   source: z.string().max(256).optional(),
   description: z.string().max(100_000).optional(),
+  description_hash: z.string().min(1).max(128).optional(),
   required_skills: skillsSchema.optional(),
   preferred_skills: skillsSchema.optional(),
   remote_status: z.string().max(128).optional(),
   salary: z.string().max(256).optional(),
-  posted_date: z.string().max(64).optional(),
+  posted_date: postedDateSchema.optional(),
 });
 
 export type SaveJobInput = z.infer<typeof saveJobInputSchema>;
@@ -28,6 +33,7 @@ export type JobRecord = {
   location: string | null;
   source: string | null;
   description: string | null;
+  description_hash: string | null;
   required_skills: unknown;
   preferred_skills: unknown;
   remote_status: string | null;
@@ -46,6 +52,7 @@ function mapRow(row: Record<string, unknown>): JobRecord {
     location: row.location == null ? null : String(row.location),
     source: row.source == null ? null : String(row.source),
     description: row.description == null ? null : String(row.description),
+    description_hash: row.description_hash == null ? null : String(row.description_hash),
     required_skills: row.required_skills ?? [],
     preferred_skills: row.preferred_skills ?? [],
     remote_status: row.remote_status == null ? null : String(row.remote_status),
@@ -64,7 +71,7 @@ export async function saveJob(input: SaveJobInput): Promise<JobRecord> {
 
   const rows = await sql`
     INSERT INTO jobs (
-      company, title, url, location, source, description,
+      company, title, url, location, source, description, description_hash,
       required_skills, preferred_skills, remote_status, salary, posted_date
     ) VALUES (
       ${input.company},
@@ -73,6 +80,7 @@ export async function saveJob(input: SaveJobInput): Promise<JobRecord> {
       ${input.location ?? null},
       ${input.source ?? null},
       ${input.description ?? null},
+      ${input.description_hash ?? null},
       ${requiredSkills}::jsonb,
       ${preferredSkills}::jsonb,
       ${input.remote_status ?? null},
@@ -92,9 +100,19 @@ export async function getJob(id: string): Promise<JobRecord | null> {
   return mapRow(rows[0] as Record<string, unknown>);
 }
 
-export async function searchJobs(query: string, limit: number): Promise<JobRecord[]> {
+export type JobPage = {
+  jobs: JobRecord[];
+  nextOffset: number | null;
+};
+
+export async function searchJobs(
+  query: string,
+  limit: number,
+  offset = 0,
+): Promise<JobPage> {
   const sql = getSql();
   const pattern = `%${query}%`;
+  const fetchLimit = limit + 1;
   const rows = await sql`
     SELECT * FROM jobs
     WHERE
@@ -105,20 +123,41 @@ export async function searchJobs(query: string, limit: number): Promise<JobRecor
       OR COALESCE(source, '') ILIKE ${pattern}
       OR COALESCE(description, '') ILIKE ${pattern}
     ORDER BY created_at DESC
-    LIMIT ${limit}
+    LIMIT ${fetchLimit}
+    OFFSET ${offset}
   `;
-  return rows.map((row) => mapRow(row as Record<string, unknown>));
+  const hasMore = rows.length > limit;
+  const jobs = rows
+    .slice(0, limit)
+    .map((row) => mapRow(row as Record<string, unknown>));
+  return {
+    jobs,
+    nextOffset: hasMore ? offset + jobs.length : null,
+  };
 }
 
-export async function listRecentJobs(days: number, limit: number): Promise<JobRecord[]> {
+export async function listRecentJobs(
+  days: number,
+  limit: number,
+  offset = 0,
+): Promise<JobPage> {
   const sql = getSql();
+  const fetchLimit = limit + 1;
   const rows = await sql`
     SELECT * FROM jobs
     WHERE created_at >= NOW() - (${days}::text || ' days')::interval
     ORDER BY created_at DESC
-    LIMIT ${limit}
+    LIMIT ${fetchLimit}
+    OFFSET ${offset}
   `;
-  return rows.map((row) => mapRow(row as Record<string, unknown>));
+  const hasMore = rows.length > limit;
+  const jobs = rows
+    .slice(0, limit)
+    .map((row) => mapRow(row as Record<string, unknown>));
+  return {
+    jobs,
+    nextOffset: hasMore ? offset + jobs.length : null,
+  };
 }
 
 export async function deleteJob(id: string): Promise<boolean> {

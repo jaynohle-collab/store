@@ -196,6 +196,7 @@ class RemoteMcpMemoryAdapter:
             "save_canonical_job",
             "get_canonical_job",
             "find_canonical_jobs",
+            "find_canonical_jobs_by_company",
             "touch_canonical_job",
             "save_job_posting",
             "update_job_posting",

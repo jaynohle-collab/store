@@ -53,6 +53,21 @@ class InMemoryLifecycleStore:
             and row.get("normalized_title") == normalized_title
         ]
 
+    async def find_canonical_jobs_by_company(
+        self, company_key: str, limit: int = 100, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        rows = [
+            dict(row)
+            for row in self.canonical_jobs.values()
+            if row.get("company_key") == company_key
+        ]
+        rows.sort(key=lambda r: str(r.get("last_seen_at") or ""), reverse=True)
+        return rows[offset : offset + limit]
+
+    async def get_job_posting(self, posting_id: str) -> dict[str, Any] | None:
+        row = self.job_postings.get(posting_id)
+        return dict(row) if row else None
+
     async def save_job_posting(self, payload: dict[str, Any]) -> dict[str, Any]:
         row = {
             "id": _id(),
@@ -139,6 +154,14 @@ class InMemoryLifecycleStore:
         return results[:limit]
 
     async def record_application(self, payload: dict[str, Any]) -> dict[str, Any]:
+        posting = self.job_postings.get(str(payload["posting_id"]))
+        if posting is None:
+            raise ValueError(f"posting_id {payload['posting_id']} does not exist")
+        if str(posting.get("canonical_job_id")) != str(payload["canonical_job_id"]):
+            raise ValueError(
+                f"posting_id {payload['posting_id']} belongs to canonical_job_id "
+                f"{posting.get('canonical_job_id')}, not {payload['canonical_job_id']}"
+            )
         row = {
             "id": _id(),
             "created_at": _now(),

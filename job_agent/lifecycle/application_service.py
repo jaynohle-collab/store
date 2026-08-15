@@ -4,9 +4,14 @@ from datetime import datetime, timezone
 from typing import Any, Protocol
 
 
+class ApplicationIntegrityError(ValueError):
+    """Raised when application IDs do not refer to a consistent posting/canonical pair."""
+
+
 class ApplicationStore(Protocol):
     async def record_application(self, payload: dict[str, Any]) -> dict[str, Any]: ...
     async def get_application(self, application_id: str) -> dict[str, Any] | None: ...
+    async def get_job_posting(self, posting_id: str) -> dict[str, Any] | None: ...
     async def list_applications(self, **filters: Any) -> list[dict[str, Any]]: ...
     async def update_application_status(self, payload: dict[str, Any]) -> dict[str, Any] | None: ...
     async def add_application_event(self, payload: dict[str, Any]) -> dict[str, Any]: ...
@@ -32,6 +37,7 @@ class ApplicationService:
         notes: str | None = None,
         create_applied_event: bool = True,
     ) -> dict[str, Any]:
+        await self._assert_posting_belongs_to_canonical(posting_id, canonical_job_id)
         application = await self.store.record_application(
             {
                 "canonical_job_id": canonical_job_id,
@@ -52,6 +58,25 @@ class ApplicationService:
                 notes=notes,
             )
         return application
+
+    async def _assert_posting_belongs_to_canonical(
+        self,
+        posting_id: str,
+        canonical_job_id: str,
+    ) -> None:
+        if not hasattr(self.store, "get_job_posting"):
+            return
+        posting = await self.store.get_job_posting(posting_id)
+        if posting is None:
+            raise ApplicationIntegrityError(
+                f"posting_id {posting_id} does not exist"
+            )
+        posting_canonical = str(posting.get("canonical_job_id") or "")
+        if posting_canonical != str(canonical_job_id):
+            raise ApplicationIntegrityError(
+                f"posting_id {posting_id} belongs to canonical_job_id "
+                f"{posting_canonical}, not {canonical_job_id}"
+            )
 
     async def update_status(
         self,

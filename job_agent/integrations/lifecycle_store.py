@@ -38,6 +38,23 @@ class RemoteLifecycleStore:
         )
         return list((result or {}).get("canonical_jobs") or [])
 
+    async def find_canonical_jobs_by_company(
+        self, company_key: str, limit: int = 100, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        result = await self._call(
+            "find_canonical_jobs_by_company",
+            {
+                "company_key": company_key,
+                "limit": min(limit, 100),
+                "offset": offset,
+            },
+        )
+        return list((result or {}).get("canonical_jobs") or [])
+
+    async def get_job_posting(self, posting_id: str) -> dict[str, Any] | None:
+        result = await self._call("get_job_posting", {"id": posting_id})
+        return (result or {}).get("posting")
+
     async def save_job_posting(self, payload: dict[str, Any]) -> dict[str, Any]:
         cleaned = {k: v for k, v in payload.items() if v is not None}
         result = await self._call("save_job_posting", cleaned)

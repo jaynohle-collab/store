@@ -1,9 +1,13 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from typing import Any
 
-from ..memory.fingerprint import description_similarity, title_similarity
+from .similarity import (
+    CANONICAL_MATCH_THRESHOLD,
+    CanonicalJobSimilarityScorer,
+    CanonicalSimilarityResult,
+)
 from .types import (
     LifecycleClassification,
     NormalizedLifecyclePosting,
@@ -16,6 +20,12 @@ from .types import (
 # newly discovered posted_date / discovery time to count as a time-gap signal.
 REPOST_MIN_GAP_DAYS = 14
 
+# Description similarity below this (with weak lifecycle signals) => NEW_JOB.
+CLEARLY_DIFFERENT_DESCRIPTION_THRESHOLD = 0.20
+
+# Role-family mismatch + description below this => NEW_JOB.
+ROLE_FAMILY_DESC_MISMATCH_THRESHOLD = 0.35
+
 CLOSED_POSTING_STATUSES = frozenset(
     {"closed", "expired", "removed", "inactive", "filled"},
 )
@@ -24,12 +34,23 @@ CLOSED_POSTING_STATUSES = frozenset(
 class PostingLifecycleClassifier:
     """Deterministic SAME_POSTING / REPOST / NEW_JOB classifier.
 
-    Company+title similarity identifies a *canonical role*, never auto-discards.
-    Posting-level identity is URL or (source + external_job_id).
+    Posting identity is ONLY:
+      - same normalized URL, or
+      - same source + external_job_id
+
+    description_hash is never posting identity.
+    Canonical role matching uses CanonicalJobSimilarityScorer (not match_score).
     """
 
-    def __init__(self, min_gap_days: int = REPOST_MIN_GAP_DAYS):
+    def __init__(
+        self,
+        min_gap_days: int = REPOST_MIN_GAP_DAYS,
+        similarity_scorer: CanonicalJobSimilarityScorer | None = None,
+        canonical_match_threshold: float = CANONICAL_MATCH_THRESHOLD,
+    ):
         self.min_gap_days = min_gap_days
+        self.similarity_scorer = similarity_scorer or CanonicalJobSimilarityScorer()
+        self.canonical_match_threshold = canonical_match_threshold
 
     def classify(
         self,
@@ -48,7 +69,7 @@ class PostingLifecycleClassifier:
                 matched_posting=same["posting"],
             )
 
-        canonical_match = self._find_canonical_match(
+        canonical_match = self._find_best_canonical_match(
             candidate,
             existing_postings,
             existing_canonicals or [],
@@ -57,64 +78,71 @@ class PostingLifecycleClassifier:
             return LifecycleClassification(
                 disposition=PostingDisposition.NEW_JOB,
                 reason="no confident canonical match",
-                signals=["no_company_title_match"],
+                signals=["no_confident_canonical_match"],
             )
 
+        similarity: CanonicalSimilarityResult = canonical_match["similarity"]
         previous = canonical_match["previous_posting"]
         signals = list(canonical_match["signals"])
         identity_signals = self._different_posting_identity(candidate, previous)
         signals.extend(identity_signals)
 
+        base_kwargs = {
+            "canonical_job_id": _as_str(canonical_match["canonical_job_id"]),
+            "previous_posting_id": _as_str(previous.get("id")) if previous else None,
+            "matched_posting": previous,
+            "matched_canonical": canonical_match.get("canonical"),
+            "canonical_similarity_score": similarity.canonical_similarity_score,
+            "canonical_similarity_signals": dict(similarity.signals),
+        }
+
         if not identity_signals:
-            # Same company/title but somehow same identity fields — treat as same.
             return LifecycleClassification(
                 disposition=PostingDisposition.SAME_POSTING,
                 reason="canonical match with identical posting identity fields",
                 signals=signals + ["identity_indistinguishable"],
-                canonical_job_id=_as_str(canonical_match["canonical_job_id"]),
-                previous_posting_id=_as_str(previous.get("id")) if previous else None,
-                matched_posting=previous,
-                matched_canonical=canonical_match.get("canonical"),
+                **base_kwargs,
             )
 
-        supporting = self._repost_supporting_signals(candidate, previous)
+        supporting = self._repost_supporting_signals(candidate, previous, similarity)
         signals.extend(supporting)
 
-        if self._clearly_different_role(candidate, previous):
+        if self._clearly_different_role(candidate, previous, similarity, supporting):
             return LifecycleClassification(
                 disposition=PostingDisposition.NEW_JOB,
                 reason=(
-                    "same company and title tokens but clearly different role/description"
+                    "canonical candidates exist but responsibilities diverge; "
+                    "treating as new job"
                 ),
                 signals=signals + ["clearly_different_role"],
                 canonical_job_id=None,
-                previous_posting_id=_as_str(previous.get("id")) if previous else None,
+                previous_posting_id=base_kwargs["previous_posting_id"],
                 matched_posting=previous,
+                matched_canonical=canonical_match.get("canonical"),
+                canonical_similarity_score=similarity.canonical_similarity_score,
+                canonical_similarity_signals=dict(similarity.signals),
             )
 
         if supporting:
             return LifecycleClassification(
                 disposition=PostingDisposition.REPOST,
                 reason=(
-                    "same company and normalized role, different posting identity, "
-                    "with supporting repost signals"
+                    "confident canonical match with different posting identity "
+                    "and supporting lifecycle signals"
                 ),
                 signals=signals,
-                canonical_job_id=_as_str(canonical_match["canonical_job_id"]),
-                previous_posting_id=_as_str(previous.get("id")) if previous else None,
-                matched_posting=previous,
-                matched_canonical=canonical_match.get("canonical"),
+                **base_kwargs,
             )
 
-        # Company+title match + different identity but no supporting signals:
-        # do not auto-repost solely on title match.
         return LifecycleClassification(
             disposition=PostingDisposition.NEW_JOB,
             reason=(
-                "same company/title candidates exist but insufficient repost signals; "
+                "confident canonical match but insufficient repost signals; "
                 "treating as new job"
             ),
             signals=signals + ["insufficient_repost_signals"],
+            canonical_similarity_score=similarity.canonical_similarity_score,
+            canonical_similarity_signals=dict(similarity.signals),
         )
 
     def _find_same_posting(
@@ -147,58 +175,62 @@ class PostingLifecycleClassifier:
                     }
         return None
 
-    def _find_canonical_match(
+    def _find_best_canonical_match(
         self,
         candidate: NormalizedLifecyclePosting,
         existing_postings: list[dict[str, Any]],
         existing_canonicals: list[dict[str, Any]],
     ) -> dict[str, Any] | None:
+        """Score same-company canonical candidates; pick best above threshold."""
+        best: dict[str, Any] | None = None
+        best_score = -1.0
+
+        # Prefer explicit canonical rows (indexed company lookup).
         for canonical in existing_canonicals:
-            if (
-                canonical.get("company_key") == candidate.company_key
-                and canonical.get("normalized_title") == candidate.normalized_title
-            ):
-                previous = self._latest_posting_for_canonical(
-                    existing_postings,
-                    _as_str(canonical.get("id")),
-                )
-                return {
+            if canonical.get("company_key") != candidate.company_key:
+                continue
+            previous = self._latest_posting_for_canonical(
+                existing_postings,
+                _as_str(canonical.get("id")),
+            )
+            role_payload = _role_payload_from_canonical(canonical, previous)
+            similarity = self.similarity_scorer.score(candidate, role_payload)
+            if similarity.canonical_similarity_score < self.canonical_match_threshold:
+                continue
+            if similarity.canonical_similarity_score > best_score:
+                best_score = similarity.canonical_similarity_score
+                best = {
                     "canonical_job_id": canonical.get("id"),
                     "canonical": canonical,
                     "previous_posting": previous,
-                    "signals": ["same_company_key", "same_normalized_title"],
+                    "similarity": similarity,
+                    "signals": [
+                        "company_key_lookup",
+                        f"canonical_similarity>={self.canonical_match_threshold}",
+                    ],
                 }
 
-        # Fall back: infer from postings that carry company/title fields.
-        best: dict[str, Any] | None = None
-        best_score = 0.0
+        # Also score enriched postings that carry company/title/description.
         for posting in existing_postings:
             company_key = posting.get("company_key") or _company_key_from_posting(posting)
-            title_key = posting.get("normalized_title") or _title_key_from_posting(posting)
             if not company_key or company_key != candidate.company_key:
                 continue
-            if title_key == candidate.normalized_title:
-                score = 1.0
-            else:
-                score = title_similarity(candidate.normalized_title, title_key)
-                role_family = posting.get("role_family")
-                if (
-                    candidate.role_family
-                    and role_family
-                    and candidate.role_family == role_family
-                    and score >= 0.85
-                ):
-                    pass
-                elif score < 0.95:
-                    continue
-            if score > best_score:
-                best_score = score
+            similarity = self.similarity_scorer.score(candidate, posting)
+            if similarity.canonical_similarity_score < self.canonical_match_threshold:
+                continue
+            if similarity.canonical_similarity_score > best_score:
+                best_score = similarity.canonical_similarity_score
                 best = {
                     "canonical_job_id": posting.get("canonical_job_id") or posting.get("id"),
                     "canonical": None,
                     "previous_posting": posting,
-                    "signals": ["same_company_key", "title_match_via_posting"],
+                    "similarity": similarity,
+                    "signals": [
+                        "same_company_posting_candidate",
+                        f"canonical_similarity>={self.canonical_match_threshold}",
+                    ],
                 }
+
         return best
 
     def _latest_posting_for_canonical(
@@ -255,6 +287,7 @@ class PostingLifecycleClassifier:
         self,
         candidate: NormalizedLifecyclePosting,
         previous: dict[str, Any] | None,
+        similarity: CanonicalSimilarityResult,
     ) -> list[str]:
         if previous is None:
             return []
@@ -282,9 +315,20 @@ class PostingLifecycleClassifier:
         if (
             candidate.description_hash
             and prev_hash
+            and candidate.description_hash == prev_hash
+        ):
+            # Identical JD text supports REPOST; never SAME_POSTING by itself.
+            signals.append("identical_description")
+        elif (
+            candidate.description_hash
+            and prev_hash
             and candidate.description_hash != prev_hash
         ):
             signals.append("description_changed")
+
+        desc_sim = float(similarity.signals.get("description_similarity") or 0.0)
+        if desc_sim >= 0.85 and "identical_description" not in signals:
+            signals.append("high_description_similarity")
 
         if candidate.external_job_id and previous.get("external_job_id"):
             if candidate.external_job_id != previous.get("external_job_id"):
@@ -296,45 +340,30 @@ class PostingLifecycleClassifier:
         self,
         candidate: NormalizedLifecyclePosting,
         previous: dict[str, Any] | None,
+        similarity: CanonicalSimilarityResult,
+        supporting: list[str],
     ) -> bool:
         if previous is None:
             return False
 
-        from ..memory.fingerprint import normalize_description_text
+        desc_sim = float(similarity.signals.get("description_similarity") or 0.0)
+        role_match = bool(similarity.signals.get("role_family_match"))
 
-        desc_sim = description_similarity(
-            normalize_description_text(candidate.description),
-            normalize_description_text(previous.get("description")),
-        )
-
-        prev_family = previous.get("role_family")
-        if (
-            candidate.role_family
-            and prev_family
-            and candidate.role_family != prev_family
-            and desc_sim < 0.35
-        ):
+        if not role_match and desc_sim < ROLE_FAMILY_DESC_MISMATCH_THRESHOLD:
             return True
 
-        # Radically different JD without strong repost identity/time signals → NEW_JOB.
-        if desc_sim < 0.2:
-            strong_repost_identity = False
-            prev_ext = previous.get("external_job_id")
-            if (
-                candidate.external_job_id
-                and prev_ext
-                and candidate.external_job_id != prev_ext
-            ):
-                strong_repost_identity = True
-            status = str(previous.get("posting_status") or previous.get("status") or "").lower()
-            if status in CLOSED_POSTING_STATUSES:
-                strong_repost_identity = True
-            prev_posted = parse_iso_date(previous.get("posted_date"))
-            if candidate.posted_date and prev_posted:
-                if (candidate.posted_date - prev_posted).days >= self.min_gap_days:
-                    strong_repost_identity = True
-            if not strong_repost_identity:
-                return True
+        strong = any(
+            s in supporting
+            for s in (
+                "source_reports_new_posting_id",
+                "meaningful_time_gap",
+                "previous_posting_closed",
+                "identical_description",
+                "new_posted_date",
+            )
+        )
+        if desc_sim < CLEARLY_DIFFERENT_DESCRIPTION_THRESHOLD and not strong:
+            return True
 
         return False
 
@@ -358,8 +387,25 @@ def _company_key_from_posting(posting: dict[str, Any]) -> str | None:
     return normalize_company_key(company) if company else None
 
 
-def _title_key_from_posting(posting: dict[str, Any]) -> str | None:
-    from ..memory.fingerprint import normalize_title_key
-
-    title = posting.get("title") or posting.get("canonical_title")
-    return normalize_title_key(title) if title else None
+def _role_payload_from_canonical(
+    canonical: dict[str, Any],
+    previous: dict[str, Any] | None,
+) -> dict[str, Any]:
+    payload = {
+        "company": canonical.get("company"),
+        "company_key": canonical.get("company_key"),
+        "title": canonical.get("title"),
+        "normalized_title": canonical.get("normalized_title"),
+        "role_family": canonical.get("role_family"),
+        "location": canonical.get("location"),
+        "normalized_location": canonical.get("normalized_location"),
+        "description": None,
+        "description_hash": None,
+    }
+    if previous:
+        payload["description"] = previous.get("description")
+        payload["description_hash"] = previous.get("description_hash")
+        payload.setdefault("location", previous.get("location"))
+        if previous.get("role_family"):
+            payload["role_family"] = previous.get("role_family")
+    return payload

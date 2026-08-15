@@ -27,9 +27,9 @@ class DuplicateDetector:
     Automatic duplicates are posting-identity matches only:
     - same normalized URL
     - same source + external_job_id
-    - same description_hash (identical JD text rediscovery)
 
-    Same company + normalized title is a *canonical role* signal, not discard.
+    description_hash is a similarity/canonical signal only — never auto-discard.
+    Same company + normalized title is a canonical-role signal, not discard.
     """
 
     def __init__(self, memory_store: MemoryStore):
@@ -95,11 +95,13 @@ class DuplicateDetector:
                 and item_description_hash
                 and fingerprint.description_hash == item_description_hash
             ):
+                # Similarity signal only — lifecycle decides REPOST vs NEW_JOB.
                 return DuplicateResult(
-                    is_duplicate=True,
-                    confidence_score=98.0,
+                    is_duplicate=False,
+                    confidence_score=90.0,
                     matched_job_id=item.get("id"),
-                    reason="same description hash",
+                    reason="same description hash (similarity signal; not auto-discard)",
+                    possible_canonical_match=True,
                 )
 
             item_company = item.get("company") or item.get("company_name") or ""
@@ -108,7 +110,6 @@ class DuplicateDetector:
                 fingerprint.company_key == normalize_company_key(item_company)
                 and fingerprint.normalized_title == normalize_title_key(item_title)
             ):
-                # Canonical-role signal only — do NOT auto-discard (may be a repost).
                 return DuplicateResult(
                     is_duplicate=False,
                     confidence_score=85.0,
@@ -162,11 +163,9 @@ class DuplicateDetector:
             same_company = fingerprint.company_key == existing_fingerprint.company_key
             matched_job_id = item.get("id") if same_company else None
             reason = self._describe_similarity(fingerprint, existing_fingerprint, score)
-            # Similarity never auto-discards; lifecycle classifier owns REPOST/NEW_JOB.
-            is_duplicate = False
 
             best_result = DuplicateResult(
-                is_duplicate=is_duplicate,
+                is_duplicate=False,
                 confidence_score=round(score, 2),
                 matched_job_id=matched_job_id,
                 reason=reason,

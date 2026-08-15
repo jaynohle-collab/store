@@ -55,7 +55,6 @@ class JobSearchWorkflow:
         matches: list[JobMatch] = []
         seen_urls: set[str] = set()
         seen_external_ids: set[tuple[str, str]] = set()
-        seen_hashes: set[str] = set()
         tracker = DiscoveryRunTracker(source="workflow")
 
         for job_input in job_inputs:
@@ -81,18 +80,13 @@ class JobSearchWorkflow:
                     )
                     continue
 
-            if fingerprint.description_hash and fingerprint.description_hash in seen_hashes:
-                reason = "Duplicate description hash in current search batch"
-                logger.info("duplicate result: %s", reason)
-                matches.append(self._build_duplicate_match(job_input, posting, fingerprint, reason, 0.98))
-                continue
+            # description_hash is NOT posting identity — do not batch-discard on it.
+            # Lifecycle classifier must evaluate identical-JD reposts.
 
             if normalized:
                 seen_urls.add(normalized)
             if external_key:
                 seen_external_ids.add(external_key)
-            if fingerprint.description_hash:
-                seen_hashes.add(fingerprint.description_hash)
 
             # Prefer lifecycle path when a resolver is configured.
             if self.lifecycle_resolver is not None:

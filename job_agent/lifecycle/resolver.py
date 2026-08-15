@@ -19,6 +19,10 @@ from ..memory.fingerprint import (
 from ..utils.normalization import extract_role_family, normalize_location
 from .types import parse_iso_date
 
+# Cap for paginated company canonical lookup (historical roles included).
+CANONICAL_COMPANY_PAGE_SIZE = 100
+CANONICAL_COMPANY_MAX_PAGES = 50
+
 
 class LifecycleStore(Protocol):
     async def find_posting_by_normalized_url(self, normalized_url: str) -> dict[str, Any] | None: ...
@@ -28,10 +32,13 @@ class LifecycleStore(Protocol):
     async def find_canonical_jobs(
         self, company_key: str, normalized_title: str
     ) -> list[dict[str, Any]]: ...
+    async def find_canonical_jobs_by_company(
+        self, company_key: str, limit: int = 100, offset: int = 0
+    ) -> list[dict[str, Any]]: ...
     async def list_postings_for_canonical(
         self, canonical_job_id: str
     ) -> list[dict[str, Any]]: ...
-    async def list_recent_postings(self, days: int = 36500, limit: int = 500) -> list[dict[str, Any]]: ...
+    async def get_job_posting(self, posting_id: str) -> dict[str, Any] | None: ...
     async def save_canonical_job(self, payload: dict[str, Any]) -> dict[str, Any]: ...
     async def save_job_posting(self, payload: dict[str, Any]) -> dict[str, Any]: ...
     async def update_job_posting(self, payload: dict[str, Any]) -> dict[str, Any] | None: ...
@@ -55,12 +62,11 @@ class CanonicalJobResolver:
         self,
         posting: NormalizedLifecyclePosting,
     ) -> LifecycleClassification:
-        existing_postings = await self._gather_candidate_postings(posting)
-        existing_canonicals = await self.store.find_canonical_jobs(
-            posting.company_key,
-            posting.normalized_title,
+        existing_canonicals = await self._load_company_canonicals(posting.company_key)
+        existing_postings = await self._gather_candidate_postings(
+            posting, existing_canonicals
         )
-        # Enrich postings with company/title from canonicals when missing.
+
         canonical_by_id = {str(c.get("id")): c for c in existing_canonicals}
         enriched: list[dict[str, Any]] = []
         for item in existing_postings:
@@ -147,7 +153,6 @@ class CanonicalJobResolver:
         )
 
         if plan.update_posting_id:
-            # SAME_POSTING: refresh last_seen_at; keep first_seen_at stable.
             payload: dict[str, Any] = {
                 "id": plan.update_posting_id,
                 "last_seen_at": now,
@@ -196,9 +201,32 @@ class CanonicalJobResolver:
             )
         return canonical, job_posting
 
+    async def _load_company_canonicals(self, company_key: str) -> list[dict[str, Any]]:
+        """Paginated company_key lookup — not limited to recent postings."""
+        if hasattr(self.store, "find_canonical_jobs_by_company"):
+            results: list[dict[str, Any]] = []
+            offset = 0
+            for _ in range(CANONICAL_COMPANY_MAX_PAGES):
+                page = await self.store.find_canonical_jobs_by_company(
+                    company_key,
+                    limit=CANONICAL_COMPANY_PAGE_SIZE,
+                    offset=offset,
+                )
+                if not page:
+                    break
+                results.extend(page)
+                if len(page) < CANONICAL_COMPANY_PAGE_SIZE:
+                    break
+                offset += len(page)
+            return results
+
+        # Fallback for stores that only implement exact title lookup.
+        return []
+
     async def _gather_candidate_postings(
         self,
         posting: NormalizedLifecyclePosting,
+        existing_canonicals: list[dict[str, Any]],
     ) -> list[dict[str, Any]]:
         found: dict[str, dict[str, Any]] = {}
 
@@ -222,16 +250,21 @@ class CanonicalJobResolver:
                 )
             )
 
-        canonicals = await self.store.find_canonical_jobs(
-            posting.company_key, posting.normalized_title
-        )
-        for canonical in canonicals:
+        # Load postings for every same-company canonical (historical, not recent-only).
+        for canonical in existing_canonicals:
             cid = canonical.get("id")
             if cid:
                 add(await self.store.list_postings_for_canonical(str(cid)))
 
-        # Broad recent window so classifier can see other company postings.
-        add(await self.store.list_recent_postings(days=36500, limit=500))
+        # Exact title filter still useful as a narrow supplement.
+        exact = await self.store.find_canonical_jobs(
+            posting.company_key, posting.normalized_title
+        )
+        for canonical in exact:
+            cid = canonical.get("id")
+            if cid and str(cid) not in {str(c.get("id")) for c in existing_canonicals}:
+                add(await self.store.list_postings_for_canonical(str(cid)))
+
         return list(found.values())
 
 

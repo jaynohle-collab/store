@@ -9,9 +9,15 @@ from .types import (
 )
 from .classifier import PostingLifecycleClassifier
 from .resolver import CanonicalJobResolver
-from .application_service import ApplicationService
+from .application_service import ApplicationService, ApplicationIntegrityError
 from .process import process_discovered_job
 from .queries import LifecycleQueryService
+from .similarity import (
+    CanonicalJobSimilarityScorer,
+    CanonicalSimilarityResult,
+    CANONICAL_MATCH_THRESHOLD,
+    CANONICAL_HIGH_CONFIDENCE_THRESHOLD,
+)
 
 __all__ = [
     "PostingDisposition",
@@ -22,6 +28,11 @@ __all__ = [
     "PostingLifecycleClassifier",
     "CanonicalJobResolver",
     "ApplicationService",
+    "ApplicationIntegrityError",
     "process_discovered_job",
     "LifecycleQueryService",
+    "CanonicalJobSimilarityScorer",
+    "CanonicalSimilarityResult",
+    "CANONICAL_MATCH_THRESHOLD",
+    "CANONICAL_HIGH_CONFIDENCE_THRESHOLD",
 ]

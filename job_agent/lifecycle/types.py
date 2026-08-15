@@ -44,6 +44,8 @@ class LifecycleClassification:
     previous_posting_id: str | None = None
     matched_posting: dict[str, Any] | None = None
     matched_canonical: dict[str, Any] | None = None
+    canonical_similarity_score: float | None = None
+    canonical_similarity_signals: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -52,6 +54,8 @@ class LifecycleClassification:
             "signals": list(self.signals),
             "canonical_job_id": self.canonical_job_id,
             "previous_posting_id": self.previous_posting_id,
+            "canonical_similarity_score": self.canonical_similarity_score,
+            "canonical_similarity_signals": dict(self.canonical_similarity_signals),
         }
 
 
@@ -96,6 +100,8 @@ class DiscoveredJobResult:
             "signals": self.classification.signals,
             "canonical_job_id": self.classification.canonical_job_id,
             "previous_posting_id": self.classification.previous_posting_id,
+            "canonical_similarity_score": self.classification.canonical_similarity_score,
+            "canonical_similarity_signals": self.classification.canonical_similarity_signals,
             "match_score": self.match_score,
             "persistence_plan": self.persistence_plan.to_dict(),
             "persisted": self.persisted,

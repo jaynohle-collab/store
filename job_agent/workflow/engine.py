@@ -139,7 +139,7 @@ class JobSearchWorkflow:
         fingerprint: JobFingerprint,
         reason: str,
         confidence: float,
-        matched_job_id: int | None = None,
+        matched_job_id: int | str | None = None,
     ) -> JobMatch:
         return JobMatch(
             job_input=job_input,

@@ -1,3 +1,4 @@
 fastmcp
+mcp>=2.0,<3
 sqlalchemy>=2.0
 pydantic>=2.0

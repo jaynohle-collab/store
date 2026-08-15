@@ -160,6 +160,53 @@ describe("JWT validation", () => {
 });
 
 describe("tool permission HTTP enforcement", () => {
+  it("enforces modern Mcp-Method and Mcp-Name headers without parsing a body", async () => {
+    const req = new Request("https://example.com/api/mcp", {
+      method: "POST",
+      headers: {
+        "Mcp-Method": "tools/call",
+        "Mcp-Name": "delete_job",
+      },
+    });
+    const auth = { token: "t", clientId: "c", scopes: [SCOPES.READ] };
+
+    const response = await enforceToolPermission(req, auth);
+    expect(response?.status).toBe(403);
+    expect(await response!.json()).toMatchObject({ error: "insufficient_scope" });
+  });
+
+  it("rejects a modern header/body tool-name mismatch", async () => {
+    const req = new Request("https://example.com/api/mcp", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Mcp-Method": "tools/call",
+        "Mcp-Name": "get_job",
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "delete_job", arguments: {} },
+      }),
+    });
+    const auth = { token: "t", clientId: "c", scopes: [SCOPES.READ] };
+
+    const response = await enforceToolPermission(req, auth);
+    expect(response?.status).toBe(400);
+  });
+
+  it("requires Mcp-Name for a modern tools/call request", async () => {
+    const req = new Request("https://example.com/api/mcp", {
+      method: "POST",
+      headers: { "Mcp-Method": "tools/call" },
+    });
+    const auth = { token: "t", clientId: "c", scopes: [SCOPES.READ] };
+
+    const response = await enforceToolPermission(req, auth);
+    expect(response?.status).toBe(400);
+  });
+
   it("returns 403 when token lacks required permission", async () => {
     const req = new Request("https://example.com/api/mcp", {
       method: "POST",

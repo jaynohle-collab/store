@@ -14,11 +14,6 @@ const mcpHandler = createMcpHandler(
       name: SERVICE_NAME,
       version: SERVICE_VERSION,
     },
-  },
-  {
-    basePath: "/api",
-    maxDuration: 60,
-    disableSse: true,
     verboseLogs: false,
   },
 );

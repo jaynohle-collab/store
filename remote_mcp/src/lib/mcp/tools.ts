@@ -1,5 +1,4 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
+import type { AuthInfo, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 
 import { assertToolPermission } from "../auth/permissions";
@@ -9,14 +8,15 @@ import {
   listRecentJobs,
   saveJob,
   saveJobInputSchema,
+  postedDateSchema,
   searchJobs,
 } from "../db/jobs";
 
 const PERSISTENCE_NOTE =
   " Persistence layer only — does not score, rank, detect duplicates, or decide whether a job should be saved.";
 
-function getAuth(extra: { authInfo?: AuthInfo }): AuthInfo | undefined {
-  return extra.authInfo;
+function getAuth(context: { http?: { authInfo?: AuthInfo } }): AuthInfo | undefined {
+  return context.http?.authInfo;
 }
 
 function jsonResult(payload: unknown) {
@@ -39,19 +39,20 @@ export function registerJobTools(server: McpServer): void {
     {
       title: "Save Job",
       description: "Store a job posting in Neon PostgreSQL." + PERSISTENCE_NOTE,
-      inputSchema: {
+      inputSchema: z.object({
         company: z.string().min(1).describe("Company name"),
         title: z.string().min(1).describe("Job title"),
         url: z.string().url().describe("Canonical job posting URL"),
         location: z.string().optional().describe("Job location"),
         source: z.string().optional().describe("Discovery source"),
         description: z.string().optional().describe("Job description text"),
+        description_hash: z.string().min(1).max(128).optional().describe("Python-computed description fingerprint"),
         required_skills: z.array(z.string()).optional().describe("Required skills"),
         preferred_skills: z.array(z.string()).optional().describe("Preferred skills"),
         remote_status: z.string().optional().describe("Remote / hybrid / onsite status"),
         salary: z.string().optional().describe("Salary text"),
-        posted_date: z.string().optional().describe("Posted date (ISO-8601)"),
-      },
+        posted_date: postedDateSchema.optional().describe("Posted date (ISO date or datetime with offset)"),
+      }),
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
@@ -77,9 +78,9 @@ export function registerJobTools(server: McpServer): void {
     {
       title: "Get Job",
       description: "Retrieve a stored job by UUID." + PERSISTENCE_NOTE,
-      inputSchema: {
+      inputSchema: z.object({
         id: z.string().uuid().describe("Job UUID"),
-      },
+      }),
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -109,10 +110,11 @@ export function registerJobTools(server: McpServer): void {
       description:
         "Search stored jobs across company, title, url, location, source, and description." +
         PERSISTENCE_NOTE,
-      inputSchema: {
+      inputSchema: z.object({
         query: z.string().min(1).describe("Search query"),
         limit: z.number().int().min(1).max(100).default(20).describe("Max results"),
-      },
+        offset: z.number().int().min(0).default(0).describe("Zero-based pagination offset"),
+      }),
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -120,11 +122,16 @@ export function registerJobTools(server: McpServer): void {
         openWorldHint: false,
       },
     },
-    async ({ query, limit }, extra) => {
+    async ({ query, limit, offset }, extra) => {
       try {
         assertToolPermission(getAuth(extra), "search_jobs");
-        const jobs = await searchJobs(query, limit ?? 20);
-        return jsonResult({ ok: true, count: jobs.length, jobs });
+        const page = await searchJobs(query, limit ?? 20, offset ?? 0);
+        return jsonResult({
+          ok: true,
+          count: page.jobs.length,
+          jobs: page.jobs,
+          next_offset: page.nextOffset,
+        });
       } catch (error) {
         const message = error instanceof Error ? error.message : "Failed to search jobs";
         return errorResult(message);
@@ -137,10 +144,11 @@ export function registerJobTools(server: McpServer): void {
     {
       title: "List Recent Jobs",
       description: "List jobs created within the last N days." + PERSISTENCE_NOTE,
-      inputSchema: {
-        days: z.number().int().min(1).max(365).default(7).describe("Lookback window in days"),
+      inputSchema: z.object({
+        days: z.number().int().min(1).max(36500).default(7).describe("Lookback window in days"),
         limit: z.number().int().min(1).max(100).default(20).describe("Max results"),
-      },
+        offset: z.number().int().min(0).default(0).describe("Zero-based pagination offset"),
+      }),
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -148,11 +156,16 @@ export function registerJobTools(server: McpServer): void {
         openWorldHint: false,
       },
     },
-    async ({ days, limit }, extra) => {
+    async ({ days, limit, offset }, extra) => {
       try {
         assertToolPermission(getAuth(extra), "list_recent_jobs");
-        const jobs = await listRecentJobs(days ?? 7, limit ?? 20);
-        return jsonResult({ ok: true, count: jobs.length, jobs });
+        const page = await listRecentJobs(days ?? 7, limit ?? 20, offset ?? 0);
+        return jsonResult({
+          ok: true,
+          count: page.jobs.length,
+          jobs: page.jobs,
+          next_offset: page.nextOffset,
+        });
       } catch (error) {
         const message = error instanceof Error ? error.message : "Failed to list jobs";
         return errorResult(message);
@@ -165,9 +178,9 @@ export function registerJobTools(server: McpServer): void {
     {
       title: "Delete Job",
       description: "Permanently delete a stored job by UUID. Destructive." + PERSISTENCE_NOTE,
-      inputSchema: {
+      inputSchema: z.object({
         id: z.string().uuid().describe("Job UUID"),
-      },
+      }),
       annotations: {
         readOnlyHint: false,
         destructiveHint: true,

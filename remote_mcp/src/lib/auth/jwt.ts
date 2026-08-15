@@ -1,5 +1,5 @@
 import { createRemoteJWKSet, jwtVerify, errors as JoseErrors } from "jose";
-import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
+import type { AuthInfo } from "@modelcontextprotocol/server";
 
 import {
   getAuth0Audience,

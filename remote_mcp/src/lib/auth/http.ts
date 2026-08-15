@@ -1,4 +1,4 @@
-import type { AuthInfo } from "@modelcontextprotocol/sdk/server/auth/types.js";
+import type { AuthInfo } from "@modelcontextprotocol/server";
 
 import { getProtectedResourceUrl } from "../config";
 import { requiredPermissionForTool, hasPermission } from "./permissions";
@@ -43,9 +43,52 @@ export function forbiddenResponse(req: Request, description: string): Response {
   );
 }
 
+function headerMismatchResponse(message: string): Response {
+  return new Response(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32001, message },
+    }),
+    {
+      status: 400,
+      headers: { "Content-Type": "application/json" },
+    },
+  );
+}
+
+type LegacyRoute = {
+  method?: string;
+  name?: string;
+};
+
+async function readLegacyRoute(req: Request): Promise<LegacyRoute> {
+  const contentType = req.headers.get("content-type") || "";
+  if (!contentType.includes("application/json") && !contentType.includes("text/plain")) {
+    return {};
+  }
+
+  try {
+    const body = (await req.clone().json()) as {
+      method?: unknown;
+      params?: { name?: unknown };
+    };
+    return {
+      method: typeof body?.method === "string" ? body.method : undefined,
+      name: typeof body?.params?.name === "string" ? body.params.name : undefined,
+    };
+  } catch {
+    return {};
+  }
+}
+
 /**
- * Inspect JSON-RPC tools/call requests and enforce per-tool Auth0 permissions.
- * Clones the request body so the downstream MCP handler can still read it.
+ * Enforce per-tool permissions for both MCP protocol eras:
+ * - 2026-07-28: route from Mcp-Method / Mcp-Name headers.
+ * - legacy Streamable HTTP: route from the JSON-RPC request body.
+ *
+ * If modern headers and a legacy body are both present, reject mismatches before
+ * authorization so a read-tool header cannot be paired with a destructive body.
  */
 export async function enforceToolPermission(
   req: Request,
@@ -53,24 +96,25 @@ export async function enforceToolPermission(
 ): Promise<Response | null> {
   if (req.method !== "POST") return null;
 
-  const contentType = req.headers.get("content-type") || "";
-  if (!contentType.includes("application/json") && !contentType.includes("text/plain")) {
-    return null;
+  const headerMethod = req.headers.get("mcp-method")?.trim();
+  const headerName = req.headers.get("mcp-name")?.trim();
+  const legacy = await readLegacyRoute(req);
+
+  if (headerMethod && legacy.method && headerMethod !== legacy.method) {
+    return headerMismatchResponse("Mcp-Method does not match the request body");
+  }
+  if (headerName && legacy.name && headerName !== legacy.name) {
+    return headerMismatchResponse("Mcp-Name does not match the request body");
   }
 
-  let body: unknown;
-  try {
-    body = await req.clone().json();
-  } catch {
-    return null;
-  }
-
-  if (!body || typeof body !== "object") return null;
-  const method = (body as { method?: unknown }).method;
+  const method = headerMethod || legacy.method;
   if (method !== "tools/call") return null;
 
-  const params = (body as { params?: { name?: unknown } }).params;
-  const toolName = typeof params?.name === "string" ? params.name : undefined;
+  if (headerMethod && !headerName) {
+    return headerMismatchResponse("Mcp-Name is required for tools/call");
+  }
+
+  const toolName = headerName || legacy.name;
   if (!toolName) return null;
 
   const required = requiredPermissionForTool(toolName);

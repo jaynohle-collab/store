@@ -165,3 +165,19 @@ class RemoteLifecycleStore:
     async def list_discovery_runs(self, limit: int = 20) -> list[dict[str, Any]]:
         result = await self._call("list_discovery_runs", {"limit": limit})
         return list((result or {}).get("discovery_runs") or [])
+
+    async def save_job_evaluation(self, payload: dict[str, Any]) -> dict[str, Any]:
+        cleaned = {k: v for k, v in payload.items() if v is not None}
+        result = await self._call("save_job_evaluation", cleaned)
+        return (result or {}).get("evaluation") or result
+
+    async def get_latest_job_evaluation(self, posting_id: str) -> dict[str, Any] | None:
+        result = await self._call("get_latest_job_evaluation", {"posting_id": posting_id})
+        return (result or {}).get("evaluation")
+
+    async def list_job_evaluations(self, posting_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        result = await self._call(
+            "list_job_evaluations",
+            {"posting_id": posting_id, "limit": limit},
+        )
+        return list((result or {}).get("evaluations") or [])

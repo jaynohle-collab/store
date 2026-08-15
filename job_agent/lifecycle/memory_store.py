@@ -22,6 +22,7 @@ class InMemoryLifecycleStore:
         self.applications: dict[str, dict[str, Any]] = {}
         self.application_events: dict[str, dict[str, Any]] = {}
         self.discovery_runs: dict[str, dict[str, Any]] = {}
+        self.job_evaluations: dict[str, dict[str, Any]] = {}
 
     async def save_canonical_job(self, payload: dict[str, Any]) -> dict[str, Any]:
         row = {
@@ -227,3 +228,34 @@ class InMemoryLifecycleStore:
 
     async def list_discovery_runs(self, limit: int = 20) -> list[dict[str, Any]]:
         return [dict(r) for r in list(self.discovery_runs.values())[:limit]]
+
+    async def save_job_evaluation(self, payload: dict[str, Any]) -> dict[str, Any]:
+        row = {
+            "id": _id(),
+            "created_at": _now(),
+            "evaluated_at": payload.get("evaluated_at") or _now(),
+            "metadata": {},
+            **payload,
+        }
+        self.job_evaluations[row["id"]] = row
+        return dict(row)
+
+    async def get_latest_job_evaluation(self, posting_id: str) -> dict[str, Any] | None:
+        rows = [
+            r
+            for r in self.job_evaluations.values()
+            if str(r.get("posting_id")) == str(posting_id)
+        ]
+        if not rows:
+            return None
+        rows.sort(key=lambda r: str(r.get("evaluated_at") or ""), reverse=True)
+        return dict(rows[0])
+
+    async def list_job_evaluations(self, posting_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        rows = [
+            dict(r)
+            for r in self.job_evaluations.values()
+            if str(r.get("posting_id")) == str(posting_id)
+        ]
+        rows.sort(key=lambda r: str(r.get("evaluated_at") or ""), reverse=True)
+        return rows[:limit]

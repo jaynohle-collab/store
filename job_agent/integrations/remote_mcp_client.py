@@ -216,6 +216,9 @@ class RemoteMcpMemoryAdapter:
             "list_application_events",
             "save_discovery_run",
             "list_discovery_runs",
+            "save_job_evaluation",
+            "get_latest_job_evaluation",
+            "list_job_evaluations",
         }:
             return await self.client.call_tool(name, arguments)
 

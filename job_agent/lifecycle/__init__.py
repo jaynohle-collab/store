@@ -12,6 +12,7 @@ from .resolver import CanonicalJobResolver
 from .application_service import ApplicationService, ApplicationIntegrityError
 from .process import process_discovered_job
 from .queries import LifecycleQueryService
+from .evaluation_service import EvaluationService, SCORING_VERSION, PROFILE_VERSION
 from .similarity import (
     CanonicalJobSimilarityScorer,
     CanonicalSimilarityResult,
@@ -29,6 +30,9 @@ __all__ = [
     "CanonicalJobResolver",
     "ApplicationService",
     "ApplicationIntegrityError",
+    "EvaluationService",
+    "SCORING_VERSION",
+    "PROFILE_VERSION",
     "process_discovered_job",
     "LifecycleQueryService",
     "CanonicalJobSimilarityScorer",

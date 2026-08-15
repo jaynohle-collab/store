@@ -152,6 +152,13 @@ Schema migrations:
 1. `remote_mcp/migrations/001_initial.sql` — canonical schema for new environments
 2. `remote_mcp/migrations/002_neon_poc_compatibility.sql` — safe additive migration for the already-deployed Neon PoC
 
+   - Detects existing `jobs.id` type
+   - If UUID: preserves values; backfills NULLs only
+   - If TEXT/VARCHAR: validates every non-null value is a UUID string, then converts with `USING btrim(id::text)::uuid`
+   - If any non-null id is invalid: **aborts** and leaves data unmodified
+   - Also repairs timestamps → TIMESTAMPTZ and skills → JSONB when safely convertible
+   - Fixtures/docs: `remote_mcp/migrations/fixtures/`
+
 Apply against Neon (SQL editor or `psql`). Both use `IF NOT EXISTS` / safe `ADD COLUMN IF NOT EXISTS` and do **not** destroy existing data. There is **no** `UNIQUE(url)` constraint — duplicate policy stays in Python.
 
 `description_hash` is persisted and returned so the Python agent can keep fingerprint-based duplicate detection. `search_jobs` and `list_recent_jobs` support `offset` / `next_offset` pagination so remote history is not capped at 100 rows.

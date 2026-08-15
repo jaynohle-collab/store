@@ -147,11 +147,14 @@ Never commit real secrets. See `.env.example` and `remote_mcp/.env.example`.
 
 ## Neon
 
-Schema migration:
+Schema migrations:
 
-`remote_mcp/migrations/001_initial.sql`
+1. `remote_mcp/migrations/001_initial.sql` — canonical schema for new environments
+2. `remote_mcp/migrations/002_neon_poc_compatibility.sql` — safe additive migration for the already-deployed Neon PoC
 
-Apply once against Neon (SQL editor or `psql`). It uses `IF NOT EXISTS` / safe `ADD COLUMN IF NOT EXISTS` and does **not** destroy existing data. There is **no** `UNIQUE(url)` constraint — duplicate policy stays in Python.
+Apply against Neon (SQL editor or `psql`). Both use `IF NOT EXISTS` / safe `ADD COLUMN IF NOT EXISTS` and do **not** destroy existing data. There is **no** `UNIQUE(url)` constraint — duplicate policy stays in Python.
+
+`description_hash` is persisted and returned so the Python agent can keep fingerprint-based duplicate detection. `search_jobs` and `list_recent_jobs` support `offset` / `next_offset` pagination so remote history is not capped at 100 rows.
 
 Useful indexes: `url`, `company`, `title`, `posted_date`, `created_at`.
 
@@ -201,8 +204,10 @@ python -m job_agent.examples.daily_job_run
 1. `save_job` — required: `company`, `title`, `url`
 2. `get_job` — `id`
 3. `search_jobs` — `query`, `limit`
-4. `list_recent_jobs` — `days`, `limit`
+4. `list_recent_jobs` — `days`, `limit`, `offset`
 5. `delete_job` — `id`
+
+`save_job` also accepts optional `description_hash` and validates `posted_date` as an ISO date or offset datetime.
 
 Public health endpoint (no auth): `GET /api/health`
 
@@ -217,9 +222,10 @@ save_job → get_job → search_jobs → list_recent_jobs → delete_job
 ## Security model
 
 - Cryptographic JWT verification with Auth0 JWKS (`jose`) — signature, issuer, audience, expiration, nbf
-- Per-tool permission enforcement (`jobs:read|write|delete`)
+- Per-tool permission enforcement (`jobs:read|write|delete`) for both modern `Mcp-Method` / `Mcp-Name` headers and legacy JSON-RPC bodies
 - Parameterized SQL via Neon tagged templates
-- Zod validation on MCP inputs
+- Zod 4 validation on MCP inputs
+- Official MCP Python SDK for the remote client transport
 - No client secrets on the MCP server
 - Tokens / client secrets are redacted from Python logs
 - Health endpoint never returns connection strings or secrets
@@ -239,4 +245,4 @@ python -m unittest discover -s job_agent/tests -v
 1. Auth0 tenant issuer (`AUTH0_ISSUER` / `AUTH0_TOKEN_URL`)
 2. M2M Client ID + Client Secret (Python only)
 3. Confirm Neon `DATABASE_URL` on Vercel
-4. Apply `remote_mcp/migrations/001_initial.sql` if the live table needs the new columns
+4. Apply `remote_mcp/migrations/001_initial.sql` and, for the existing Neon PoC, `002_neon_poc_compatibility.sql`

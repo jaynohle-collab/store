@@ -40,6 +40,10 @@ export const TOOL_PERMISSIONS: Record<string, JobScope> = {
   list_application_events: SCOPES.READ,
   save_discovery_run: SCOPES.WRITE,
   list_discovery_runs: SCOPES.READ,
+  // Candidate evaluations (Python scores; MCP stores only)
+  save_job_evaluation: SCOPES.WRITE,
+  get_latest_job_evaluation: SCOPES.READ,
+  list_job_evaluations: SCOPES.READ,
 };
 
 export function getAuth0Issuer(): string | undefined {

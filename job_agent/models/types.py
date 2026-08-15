@@ -134,7 +134,7 @@ class JobFingerprint:
 class DuplicateResult:
     is_duplicate: bool
     confidence_score: float
-    matched_job_id: int | None
+    matched_job_id: int | str | None
     reason: str
 
 
@@ -144,5 +144,5 @@ class JobMatch:
     posting: NormalizedJobPosting
     fingerprint: JobFingerprint
     decision: JobDecision
-    memory_job_id: int | None = None
+    memory_job_id: int | str | None = None
     saved: bool = False

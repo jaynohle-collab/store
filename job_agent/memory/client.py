@@ -5,7 +5,14 @@ from ..models.types import JobFingerprint, NormalizedJobPosting
 
 
 class MemoryStore:
-    """External MCP memory integration client."""
+    """External MCP memory integration client.
+
+    Works with:
+    - local FastMCP/SQLite tool clients (`save_job_memory`, `get_job_history`, ...)
+    - remote Auth0-secured MCP via ``RemoteMcpMemoryAdapter``
+
+    Scoring, duplicate detection, and persistence decisions stay in the Python agent.
+    """
 
     def __init__(self, tool_client: Any):
         self.tool_client = tool_client
@@ -21,6 +28,9 @@ class MemoryStore:
                 "description_hash": posting.description_hash,
                 "source": posting.source,
                 "status": posting.status,
+                "location": posting.location,
+                "remote_status": "remote" if posting.remote else None,
+                "posted_date": posting.posted_date.isoformat() if posting.posted_date else None,
             },
         )
 

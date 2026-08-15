@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
-import json
+import asyncio
 import logging
 import os
-import uuid
 from typing import Any
-from urllib import error, request
+
+import httpx2
+from mcp import Client
+from mcp.client.streamable_http import streamable_http_client
 
 from .auth0_token import Auth0Config, Auth0TokenProvider
 
@@ -31,109 +33,74 @@ class RemoteMcpClient:
             raise RemoteMcpError("JOB_MCP_URL is required for remote MCP mode")
 
         self.token_provider = token_provider or Auth0TokenProvider(Auth0Config.from_env())
-        self._request_id = 0
 
     async def call_tool(self, name: str, arguments: dict[str, Any] | None = None) -> Any:
-        return self.call_tool_sync(name, arguments or {})
+        try:
+            return await self._call_tool_once(name, arguments or {})
+        except Exception as exc:
+            if not self._is_unauthorized(exc):
+                raise self._safe_error(name, exc) from None
+
+        logger.info("Remote MCP returned 401; refreshing Auth0 token and retrying once")
+        self.token_provider.invalidate()
+        self.token_provider.get_access_token(force_refresh=True)
+        try:
+            return await self._call_tool_once(name, arguments or {})
+        except Exception as exc:
+            raise self._safe_error(name, exc) from None
 
     def call_tool_sync(self, name: str, arguments: dict[str, Any] | None = None) -> Any:
-        payload = {
-            "jsonrpc": "2.0",
-            "id": self._next_id(),
-            "method": "tools/call",
-            "params": {
-                "name": name,
-                "arguments": arguments or {},
-            },
-        }
-        response = self._post_json(payload)
-        if "error" in response:
-            raise RemoteMcpError(f"MCP tool error for {name}: {response['error']}")
+        """Synchronous convenience wrapper for non-async callers."""
+        return asyncio.run(self.call_tool(name, arguments))
 
-        result = response.get("result") or {}
-        if result.get("isError"):
-            text = self._extract_text(result)
-            raise RemoteMcpError(text or f"MCP tool {name} returned an error")
-
-        structured = result.get("structuredContent")
-        if structured is not None:
-            return structured
-
-        text = self._extract_text(result)
-        if not text:
-            return result
-        try:
-            return json.loads(text)
-        except json.JSONDecodeError:
-            return {"raw": text}
-
-    def _post_json(self, payload: dict[str, Any], *, retry_on_401: bool = True) -> dict[str, Any]:
+    async def _call_tool_once(self, name: str, arguments: dict[str, Any]) -> Any:
+        """Use the official MCP SDK for negotiation, framing, and transport."""
         token = self.token_provider.get_access_token()
-        body = json.dumps(payload).encode("utf-8")
-        req = request.Request(
-            self.mcp_url,
-            data=body,
-            method="POST",
+        async with httpx2.AsyncClient(
             headers={
                 "Authorization": f"Bearer {token}",
-                "Content-Type": "application/json",
-                "Accept": "application/json, text/event-stream",
             },
-        )
-        try:
-            with request.urlopen(req, timeout=60) as response:
-                raw = response.read().decode("utf-8")
-                content_type = response.headers.get("Content-Type", "")
-        except error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")
-            if exc.code == 401 and retry_on_401:
-                logger.info("Remote MCP returned 401; refreshing Auth0 token and retrying once")
-                self.token_provider.invalidate()
-                self.token_provider.get_access_token(force_refresh=True)
-                return self._post_json(payload, retry_on_401=False)
-            safe_detail = detail.replace(token, "[REDACTED]")
-            raise RemoteMcpError(f"Remote MCP HTTP {exc.code}: {safe_detail}") from None
-        except error.URLError as exc:
-            raise RemoteMcpError(f"Remote MCP network error: {exc.reason}") from None
+            timeout=httpx2.Timeout(30.0, read=300.0),
+            follow_redirects=True,
+        ) as http_client:
+            transport = streamable_http_client(
+                self.mcp_url,
+                http_client=http_client,
+                terminate_on_close=False,
+            )
+            async with Client(transport, mode="auto") as client:
+                result = await client.call_tool(name, arguments)
 
-        if "text/event-stream" in content_type:
-            return self._parse_sse_jsonrpc(raw)
+        if result.is_error:
+            text = self._extract_text(result.content)
+            raise RemoteMcpError(text or f"MCP tool {name} returned an error")
 
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise RemoteMcpError("Remote MCP returned non-JSON response") from exc
+        if result.structured_content is not None:
+            return result.structured_content
 
-    def _parse_sse_jsonrpc(self, raw: str) -> dict[str, Any]:
-        data_lines: list[str] = []
-        for line in raw.splitlines():
-            if line.startswith("data:"):
-                data_lines.append(line[5:].strip())
-        if not data_lines:
-            raise RemoteMcpError("Remote MCP SSE response contained no data")
-        # Prefer the last JSON-RPC payload in the stream.
-        last_error: Exception | None = None
-        for chunk in reversed(data_lines):
-            if not chunk or chunk == "[DONE]":
-                continue
-            try:
-                return json.loads(chunk)
-            except json.JSONDecodeError as exc:
-                last_error = exc
-                continue
-        raise RemoteMcpError("Unable to parse SSE JSON-RPC payload") from last_error
+        text = self._extract_text(result.content)
+        return {"raw": text} if text else result.model_dump(mode="json")
 
-    def _extract_text(self, result: dict[str, Any]) -> str:
-        content = result.get("content") or []
+    def _extract_text(self, content: list[Any]) -> str:
         texts: list[str] = []
         for item in content:
-            if isinstance(item, dict) and item.get("type") == "text":
-                texts.append(str(item.get("text") or ""))
+            if getattr(item, "type", None) == "text":
+                texts.append(str(getattr(item, "text", "") or ""))
         return "\n".join(texts).strip()
 
-    def _next_id(self) -> str:
-        self._request_id += 1
-        return f"{self._request_id}-{uuid.uuid4().hex[:8]}"
+    def _is_unauthorized(self, exc: Exception) -> bool:
+        status_code = getattr(exc, "status_code", None)
+        if status_code == 401:
+            return True
+        response = getattr(exc, "response", None)
+        return getattr(response, "status_code", None) == 401 or "401" in str(exc)
+
+    def _safe_error(self, name: str, exc: Exception) -> RemoteMcpError:
+        message = str(exc)
+        token = getattr(self.token_provider, "_access_token", None)
+        if isinstance(token, str) and token:
+            message = message.replace(token, "[REDACTED]")
+        return RemoteMcpError(f"Remote MCP call failed for {name}: {message}")
 
 
 class RemoteMcpMemoryAdapter:
@@ -154,6 +121,7 @@ class RemoteMcpMemoryAdapter:
                 "title": arguments.get("title"),
                 "url": arguments.get("url"),
                 "description": arguments.get("description"),
+                "description_hash": arguments.get("description_hash"),
                 "source": arguments.get("source"),
                 "location": arguments.get("location"),
                 "remote_status": arguments.get("remote_status"),
@@ -176,25 +144,42 @@ class RemoteMcpMemoryAdapter:
             }
 
         if name == "get_job_history":
-            result = await self.client.call_tool(
-                "list_recent_jobs",
-                {"days": int(arguments.get("days") or 365), "limit": int(arguments.get("limit") or 100)},
-            )
-            jobs = result.get("jobs") if isinstance(result, dict) else []
+            page_size = min(int(arguments.get("page_size") or 100), 100)
+            max_results = arguments.get("limit")
+            max_results = int(max_results) if max_results is not None else None
+            offset = 0
             history = []
-            for job in jobs or []:
-                history.append(
+            while True:
+                result = await self.client.call_tool(
+                    "list_recent_jobs",
                     {
-                        "id": job.get("id"),
-                        "company": job.get("company"),
-                        "title": job.get("title"),
-                        "url": job.get("url"),
-                        "status": "stored",
-                        "description": job.get("description"),
-                        "location": job.get("location"),
-                        "source": job.get("source"),
-                    }
+                        "days": int(arguments.get("days") or 36500),
+                        "limit": page_size,
+                        "offset": offset,
+                    },
                 )
+                jobs = result.get("jobs") if isinstance(result, dict) else []
+                for job in jobs or []:
+                    history.append(
+                        {
+                            "id": job.get("id"),
+                            "company": job.get("company"),
+                            "title": job.get("title"),
+                            "url": job.get("url"),
+                            "status": "stored",
+                            "description": job.get("description"),
+                            "description_hash": job.get("description_hash"),
+                            "location": job.get("location"),
+                            "source": job.get("source"),
+                        }
+                    )
+                    if max_results is not None and len(history) >= max_results:
+                        return history
+
+                next_offset = result.get("next_offset") if isinstance(result, dict) else None
+                if next_offset is None:
+                    break
+                offset = int(next_offset)
             return history
 
         if name == "check_duplicate":

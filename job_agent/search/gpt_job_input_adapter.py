@@ -42,7 +42,52 @@ class GPTJobInputAdapter:
             source=self._clean_string(raw.get("source", "gpt-search")),
             location=self._clean_string(raw.get("location")),
             metadata={k: str(v) for k, v in raw.get("metadata", {}).items()} if isinstance(raw.get("metadata"), dict) else None,
+            external_job_id=self._extract_external_id(raw),
+            posted_date=self._parse_posted_date(raw.get("posted_date")),
         )
+
+    def _extract_external_id(self, raw: dict[str, Any]) -> str | None:
+        for key in (
+            "external_job_id",
+            "external_id",
+            "job_id",
+            "greenhouse_id",
+            "lever_id",
+            "ashby_id",
+            "linkedin_job_id",
+            "requisition_id",
+        ):
+            value = raw.get(key)
+            if value is not None and str(value).strip():
+                return str(value).strip()
+        metadata = raw.get("metadata")
+        if isinstance(metadata, dict):
+            for key in (
+                "external_job_id",
+                "external_id",
+                "job_id",
+                "greenhouse_id",
+                "lever_id",
+                "ashby_id",
+                "linkedin_job_id",
+            ):
+                value = metadata.get(key)
+                if value is not None and str(value).strip():
+                    return str(value).strip()
+        return None
+
+    def _parse_posted_date(self, value: Any):
+        from datetime import date
+
+        if value is None:
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            return date.fromisoformat(text[:10])
+        except ValueError:
+            return None
 
     def _has_value(self, raw: dict[str, Any], field: str) -> bool:
         value = raw.get(field)

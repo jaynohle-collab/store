@@ -46,7 +46,7 @@ class DuplicateDetectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.reason, "same URL")
         self.assertEqual(result.matched_job_id, 1)
 
-    async def test_same_company_title_is_duplicate(self):
+    async def test_same_company_title_is_not_auto_duplicate(self):
         history = [
             {
                 "id": 2,
@@ -65,13 +65,45 @@ class DuplicateDetectorTests(unittest.IsolatedAsyncioTestCase):
             url="https://openai.com/careers",
             description="Build production AI agent infrastructure and LLM platforms",
             source="test",
+            external_job_id="different-id",
+        )
+
+        result = await detector.check_duplicate(job_input)
+
+        self.assertFalse(result.is_duplicate)
+        self.assertTrue(result.possible_canonical_match)
+        self.assertIn("canonical match", result.reason)
+        self.assertEqual(result.matched_job_id, 2)
+
+    async def test_same_source_external_id_is_duplicate(self):
+        history = [
+            {
+                "id": 9,
+                "company": "OpenAI",
+                "title": "Senior AI Engineer",
+                "url": "https://openai.com/jobs/old",
+                "description": "Build production AI agent infrastructure.",
+                "description_hash": None,
+                "status": "new",
+                "source": "greenhouse",
+                "external_job_id": "gh-42",
+            }
+        ]
+        detector = DuplicateDetector(FakeMemoryStore(history))
+        job_input = JobInput(
+            company="OpenAI",
+            title="Senior AI Engineer",
+            url="https://openai.com/jobs/new-url",
+            description="Something else",
+            source="greenhouse",
+            external_job_id="gh-42",
         )
 
         result = await detector.check_duplicate(job_input)
 
         self.assertTrue(result.is_duplicate)
-        self.assertEqual(result.reason, "same company and normalized title")
-        self.assertEqual(result.matched_job_id, 2)
+        self.assertEqual(result.reason, "same source and external_job_id")
+        self.assertEqual(result.matched_job_id, 9)
 
     async def test_similar_description_is_possible_duplicate(self):
         history = [

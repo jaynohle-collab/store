@@ -187,7 +187,36 @@ class RemoteMcpMemoryAdapter:
             # DuplicateDetector can evaluate history itself via get_job_history.
             return {"duplicate": False, "existing_job_id": None}
 
-        if name in {"save_job", "get_job", "search_jobs", "list_recent_jobs", "delete_job"}:
+        if name in {
+            "save_job",
+            "get_job",
+            "search_jobs",
+            "list_recent_jobs",
+            "delete_job",
+            "save_canonical_job",
+            "get_canonical_job",
+            "find_canonical_jobs",
+            "find_canonical_jobs_by_company",
+            "touch_canonical_job",
+            "save_job_posting",
+            "update_job_posting",
+            "get_job_posting",
+            "search_job_postings",
+            "list_recent_postings",
+            "list_postings_for_canonical",
+            "list_reposted_postings",
+            "list_reposts_with_prior_applications",
+            "find_posting_by_url",
+            "find_posting_by_external_id",
+            "record_application",
+            "get_application",
+            "list_applications",
+            "update_application_status",
+            "add_application_event",
+            "list_application_events",
+            "save_discovery_run",
+            "list_discovery_runs",
+        }:
             return await self.client.call_tool(name, arguments)
 
         if name == "update_status":

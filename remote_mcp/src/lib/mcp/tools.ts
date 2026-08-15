@@ -11,6 +11,7 @@ import {
   postedDateSchema,
   searchJobs,
 } from "../db/jobs";
+import { registerLifecycleTools } from "./lifecycle_tools";
 
 const PERSISTENCE_NOTE =
   " Persistence layer only — does not score, rank, detect duplicates, or decide whether a job should be saved.";
@@ -34,6 +35,8 @@ function errorResult(message: string) {
 }
 
 export function registerJobTools(server: McpServer): void {
+  registerLifecycleTools(server);
+
   server.registerTool(
     "save_job",
     {

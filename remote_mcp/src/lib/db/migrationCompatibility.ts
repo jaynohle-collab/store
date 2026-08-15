@@ -61,11 +61,17 @@ export function planIdConversion(
 
 export function planTimestamptzConversion(column: ColumnTypeInfo): ConversionPlan {
   const udt = column.udtName.toLowerCase();
+  const dataType = column.dataType.toLowerCase();
+
   if (udt === "timestamptz") {
     return { action: "noop", reason: "already TIMESTAMPTZ" };
   }
-  if (udt === "timestamp") {
-    return { action: "convert", using: "col AT TIME ZONE" };
+  if (udt === "timestamp" || dataType === "timestamp without time zone") {
+    return {
+      action: "abort",
+      reason:
+        "Cannot convert TIMESTAMP WITHOUT TIME ZONE to TIMESTAMPTZ: an explicit timezone assumption is required, and this repository does not document UTC (or any other) semantics for legacy PoC timestamps. Existing data was NOT modified.",
+    };
   }
   if (udt === "date") {
     return { action: "convert", using: "col::timestamptz" };
@@ -75,8 +81,13 @@ export function planTimestamptzConversion(column: ColumnTypeInfo): ConversionPla
   }
   return {
     action: "abort",
-    reason: `Cannot convert from unsupported type ${column.dataType} (${column.udtName}) to TIMESTAMPTZ`,
+    reason: `Cannot convert from unsupported type ${column.dataType} (${column.udtName}) to TIMESTAMPTZ. Existing data was NOT modified.`,
   };
+}
+
+/** Migration 002 must be one atomic transaction so failed validation rolls everything back. */
+export function requiresExplicitTransaction(): boolean {
+  return true;
 }
 
 export function planJsonbConversion(column: ColumnTypeInfo): ConversionPlan {

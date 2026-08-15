@@ -24,11 +24,19 @@ Expected: migration **fails** with an exception containing:
 and `Existing data was NOT modified`.
 No rows deleted. Invalid TEXT ids remain unchanged.
 
-## Manual verification
+## Atomicity
 
-```bash
-# Example against a local/disposable Postgres:
-psql "$DATABASE_URL" -f remote_mcp/migrations/fixtures/04_text_invalid_uuid.sql
-psql "$DATABASE_URL" -f remote_mcp/migrations/002_neon_poc_compatibility.sql
-# expect: ERROR ... not valid UUID strings ... Existing data was NOT modified
+`002_neon_poc_compatibility.sql` wraps all work in:
+
+```sql
+BEGIN;
+-- ...
+COMMIT;
 ```
+
+Any validation/cast failure raises an exception and rolls back the whole migration, so `"Existing data was NOT modified"` remains true.
+
+## TIMESTAMP WITHOUT TIME ZONE
+
+If a legacy column is `timestamp without time zone`, migration **aborts**.
+This repo has no conclusive evidence that PoC timestamps were UTC, so the migration does not invent a timezone.

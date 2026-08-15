@@ -5,6 +5,11 @@
 -- Aborts with a descriptive exception if conversion would destroy or invent data.
 -- No duplicate decisions or UNIQUE(url) constraint are introduced.
 --
+-- Atomic: the entire script runs in an explicit transaction (BEGIN/COMMIT).
+-- Any raised exception rolls back ALL changes from this migration, so the
+-- "Existing data was NOT modified" messages are accurate even if earlier steps
+-- in this file already mutated the table within the same transaction.
+--
 -- Idempotent: safe to re-run when types are already correct.
 --
 -- Expected types after success:
@@ -15,6 +20,8 @@
 --   required_skills JSONB
 --   preferred_skills JSONB
 --   description_hash TEXT  (unchanged)
+
+BEGIN;
 
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
@@ -159,6 +166,10 @@ $$;
 
 -- ---------------------------------------------------------------------------
 -- Repair posted_date / created_at / updated_at → TIMESTAMPTZ
+--
+-- TIMESTAMP WITHOUT TIME ZONE is NOT auto-converted: AT TIME ZONE requires an
+-- explicit zone, and this repository has no conclusive evidence that the Neon
+-- PoC stored naive timestamps as UTC. Abort instead of inventing a zone.
 -- ---------------------------------------------------------------------------
 DO $$
 DECLARE
@@ -179,11 +190,11 @@ BEGIN
 
     IF col_udt IS NULL OR col_udt = 'timestamptz' THEN
       CONTINUE;
-    ELSIF col_udt = 'timestamp' THEN
-      EXECUTE format(
-        'ALTER TABLE jobs ALTER COLUMN %I TYPE TIMESTAMPTZ USING %I AT TIME ZONE',
-        col_name, col_name
-      );
+    ELSIF col_udt = 'timestamp'
+          OR col_data_type = 'timestamp without time zone' THEN
+      RAISE EXCEPTION
+        'Cannot convert jobs.% from TIMESTAMP WITHOUT TIME ZONE to TIMESTAMPTZ: an explicit timezone assumption is required, and this repository does not document UTC (or any other) semantics for legacy PoC timestamps. Existing data was NOT modified. Convert the column manually with an explicit zone only after confirming the historical meaning (example: ALTER TABLE jobs ALTER COLUMN % TYPE TIMESTAMPTZ USING % AT TIME ZONE ''UTC''), then re-run this migration.',
+        col_name, col_name, col_name;
     ELSIF col_udt = 'date' THEN
       EXECUTE format(
         'ALTER TABLE jobs ALTER COLUMN %I TYPE TIMESTAMPTZ USING %I::timestamptz',
@@ -295,3 +306,5 @@ CREATE INDEX IF NOT EXISTS idx_jobs_company ON jobs (company);
 CREATE INDEX IF NOT EXISTS idx_jobs_title ON jobs (title);
 CREATE INDEX IF NOT EXISTS idx_jobs_posted_date ON jobs (posted_date);
 CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs (created_at DESC);
+
+COMMIT;

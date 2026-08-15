@@ -8,6 +8,7 @@ import {
   planIdConversion,
   planJsonbConversion,
   planTimestamptzConversion,
+  requiresExplicitTransaction,
 } from "@/lib/db/migrationCompatibility";
 
 const migrationPath = path.resolve(
@@ -17,6 +18,22 @@ const migrationPath = path.resolve(
 const migrationSql = readFileSync(migrationPath, "utf8");
 
 describe("002_neon_poc_compatibility.sql contract", () => {
+  it("wraps the entire migration in an explicit BEGIN/COMMIT transaction", () => {
+    expect(requiresExplicitTransaction()).toBe(true);
+    expect(migrationSql).toMatch(/^BEGIN;/m);
+    expect(migrationSql).toMatch(/^COMMIT;/m);
+
+    const beginIndex = migrationSql.indexOf("BEGIN;");
+    const commitIndex = migrationSql.lastIndexOf("COMMIT;");
+    expect(beginIndex).toBeGreaterThanOrEqual(0);
+    expect(commitIndex).toBeGreaterThan(beginIndex);
+
+    // Body that can mutate schema/data sits inside the transaction.
+    const body = migrationSql.slice(beginIndex, commitIndex);
+    expect(body).toContain("ALTER TABLE jobs");
+    expect(body).toContain("CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_storage_id");
+  });
+
   it("detects existing id type and converts TEXT only via USING id::uuid", () => {
     expect(migrationSql).toMatch(/id_udt\s*=\s*'uuid'/);
     expect(migrationSql).toMatch(/id_udt IN \('text', 'varchar', 'bpchar'\)/);
@@ -27,9 +44,30 @@ describe("002_neon_poc_compatibility.sql contract", () => {
   it("aborts when any non-null TEXT id is not a valid UUID string", () => {
     expect(migrationSql).toMatch(/are not valid UUID strings/);
     expect(migrationSql).toMatch(/Fix invalid IDs manually, then re-run this migration/);
-    // Must not invent replacements for existing non-null IDs.
     expect(migrationSql).not.toMatch(
       /UPDATE jobs SET id = gen_random_uuid\(\) WHERE id IS NOT NULL/i,
+    );
+  });
+
+  it("makes invalid legacy data abort inside the transaction for full rollback", () => {
+    // RAISE EXCEPTION inside BEGIN/COMMIT rolls back earlier DDL/DML in this script.
+    const beginIndex = migrationSql.indexOf("BEGIN;");
+    const commitIndex = migrationSql.lastIndexOf("COMMIT;");
+    const transactionalBody = migrationSql.slice(beginIndex, commitIndex);
+
+    expect(transactionalBody).toContain("RAISE EXCEPTION");
+    expect(transactionalBody).toContain("Existing data was NOT modified");
+    expect(transactionalBody).toMatch(/are not valid UUID strings/);
+    // No escape hatch that commits partial work before validation failures.
+    expect(transactionalBody).not.toMatch(/COMMIT;/);
+  });
+
+  it("does not silently convert TIMESTAMP WITHOUT TIME ZONE without an explicit timezone", () => {
+    expect(migrationSql).toMatch(/explicit timezone assumption is required/);
+    expect(migrationSql).toMatch(/TIMESTAMP WITHOUT TIME ZONE/);
+    // Must not emit the invalid/implicit conversion path.
+    expect(migrationSql).not.toMatch(
+      /ALTER TABLE jobs ALTER COLUMN %I TYPE TIMESTAMPTZ USING %I AT TIME ZONE/,
     );
   });
 
@@ -99,10 +137,21 @@ describe("migration compatibility scenarios", () => {
     expect(planJsonbConversion({ udtName: "jsonb", dataType: "jsonb" }).action).toBe("noop");
   });
 
-  it("converts timestamp/json and text skills safely", () => {
-    expect(
-      planTimestamptzConversion({ udtName: "timestamp", dataType: "timestamp without time zone" }).action,
-    ).toBe("convert");
+  it("aborts timestamp-without-time-zone instead of inventing a timezone", () => {
+    const plan = planTimestamptzConversion({
+      udtName: "timestamp",
+      dataType: "timestamp without time zone",
+    });
+    expect(plan.action).toBe("abort");
+    if (plan.action === "abort") {
+      expect(plan.reason).toContain("explicit timezone assumption is required");
+      expect(plan.reason).toContain("Existing data was NOT modified");
+    }
+  });
+
+  it("converts date/text timestamps and json/text skills safely", () => {
+    expect(planTimestamptzConversion({ udtName: "date", dataType: "date" }).action).toBe("convert");
+    expect(planTimestamptzConversion({ udtName: "text", dataType: "text" }).action).toBe("convert");
     expect(planJsonbConversion({ udtName: "json", dataType: "json" }).action).toBe("convert");
     expect(planJsonbConversion({ udtName: "text", dataType: "text" }).action).toBe("convert");
   });

@@ -23,6 +23,7 @@ class GPTJobRecord:
     remote_status: bool | None = None
     salary: str | None = None
     posted_date: str | None = None
+    external_job_id: str | None = None
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "GPTJobRecord":
@@ -32,6 +33,17 @@ class GPTJobRecord:
             raise GPTJobIngestionError(
                 f"Missing required GPT job fields: {', '.join(missing)}"
             )
+
+        external = (
+            data.get("external_job_id")
+            or data.get("external_id")
+            or data.get("job_id")
+            or data.get("greenhouse_id")
+            or data.get("lever_id")
+            or data.get("ashby_id")
+            or data.get("linkedin_job_id")
+            or data.get("requisition_id")
+        )
 
         return cls(
             company=str(data["company"]).strip(),
@@ -45,9 +57,19 @@ class GPTJobRecord:
             remote_status=bool(data["remote_status"]) if data.get("remote_status") is not None else None,
             salary=str(data["salary"]).strip() if data.get("salary") else None,
             posted_date=str(data["posted_date"]).strip() if data.get("posted_date") else None,
+            external_job_id=str(external).strip() if external else None,
         )
 
     def to_job_input(self) -> JobInput:
+        from datetime import date
+
+        posted: date | None = None
+        if self.posted_date:
+            try:
+                posted = date.fromisoformat(self.posted_date[:10])
+            except ValueError:
+                posted = None
+
         return JobInput(
             company=self.company,
             title=self.title,
@@ -56,6 +78,8 @@ class GPTJobRecord:
             source=self.source or "gpt-job-search",
             location=self.location,
             metadata=self._build_metadata(),
+            external_job_id=self.external_job_id,
+            posted_date=posted,
         )
 
     def _build_metadata(self) -> dict[str, str] | None:
@@ -70,6 +94,8 @@ class GPTJobRecord:
             metadata["salary"] = self.salary
         if self.posted_date:
             metadata["posted_date"] = self.posted_date
+        if self.external_job_id:
+            metadata["external_job_id"] = self.external_job_id
         return metadata or None
 
 

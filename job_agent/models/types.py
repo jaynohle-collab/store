@@ -33,6 +33,8 @@ class JobInput:
     source: str
     location: str | None = None
     metadata: dict[str, str] | None = None
+    external_job_id: str | None = None
+    posted_date: date | None = None
 
 
 @dataclass
@@ -136,6 +138,9 @@ class DuplicateResult:
     confidence_score: float
     matched_job_id: int | str | None
     reason: str
+    # Soft signal: same company+title may indicate a canonical role / possible repost,
+    # not an automatic discard.
+    possible_canonical_match: bool = False
 
 
 @dataclass

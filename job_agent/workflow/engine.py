@@ -1,5 +1,4 @@
 from __future__ import annotations
-import asyncio
 import logging
 from typing import Iterable
 
@@ -15,13 +14,23 @@ from ..memory.client import MemoryStore
 from ..memory.duplicate_detector import DuplicateDetector, POSSIBLE_DUPLICATE_THRESHOLD
 from ..ranking.scoring import ScoreCalculator
 from ..search.interfaces import JobNormalizer, JobSearchProvider
-from ..utils.normalization import normalize_company_name, normalize_title
+from ..lifecycle.url import normalize_url
+from ..lifecycle import (
+    CanonicalJobResolver,
+    process_discovered_job,
+)
+from ..lifecycle.process import DiscoveryRunTracker
+from ..lifecycle.types import PostingDisposition
 
 logger = logging.getLogger(__name__)
 
 
 class JobSearchWorkflow:
-    """Orchestrates search, deduplication, scoring, and memory persistence."""
+    """Orchestrates search, lifecycle classification, scoring, and persistence.
+
+    Company+title matches are canonical-role signals (possible REPOST), not
+    automatic discards. Posting-level duplicates use URL / external_job_id.
+    """
 
     def __init__(
         self,
@@ -31,6 +40,7 @@ class JobSearchWorkflow:
         scoring: ScoreCalculator,
         memory_store: MemoryStore,
         duplicate_detector: DuplicateDetector | None = None,
+        lifecycle_resolver: CanonicalJobResolver | None = None,
     ):
         self.profile = profile
         self.providers = providers
@@ -38,34 +48,38 @@ class JobSearchWorkflow:
         self.scoring = scoring
         self.memory_store = memory_store
         self.duplicate_detector = duplicate_detector or DuplicateDetector(self.memory_store)
+        self.lifecycle_resolver = lifecycle_resolver
 
     async def execute(self) -> list[JobMatch]:
         job_inputs = await self._search_all_sources()
         matches: list[JobMatch] = []
         seen_urls: set[str] = set()
-        seen_company_title: set[tuple[str, str]] = set()
+        seen_external_ids: set[tuple[str, str]] = set()
         seen_hashes: set[str] = set()
+        tracker = DiscoveryRunTracker(source="workflow")
 
         for job_input in job_inputs:
             logger.info("received job: %s | %s | %s", job_input.company, job_input.title, job_input.url)
             posting = self.normalizer.normalize(job_input)
             fingerprint = JobFingerprint.from_job_input(job_input)
+            normalized = normalize_url(fingerprint.url)
 
-            if fingerprint.url and fingerprint.url in seen_urls:
+            if normalized and normalized in seen_urls:
                 reason = "Duplicate URL in current search batch"
                 logger.info("duplicate result: %s", reason)
                 matches.append(self._build_duplicate_match(job_input, posting, fingerprint, reason, 1.0))
                 continue
 
-            company_title_key = (
-                normalize_company_name(job_input.company),
-                normalize_title(job_input.title),
-            )
-            if company_title_key in seen_company_title:
-                reason = "Duplicate company and title in current search batch"
-                logger.info("duplicate result: %s", reason)
-                matches.append(self._build_duplicate_match(job_input, posting, fingerprint, reason, 0.95))
-                continue
+            external_key = None
+            if job_input.source and job_input.external_job_id:
+                external_key = (job_input.source, job_input.external_job_id)
+                if external_key in seen_external_ids:
+                    reason = "Duplicate source+external_job_id in current search batch"
+                    logger.info("duplicate result: %s", reason)
+                    matches.append(
+                        self._build_duplicate_match(job_input, posting, fingerprint, reason, 1.0)
+                    )
+                    continue
 
             if fingerprint.description_hash and fingerprint.description_hash in seen_hashes:
                 reason = "Duplicate description hash in current search batch"
@@ -73,11 +87,18 @@ class JobSearchWorkflow:
                 matches.append(self._build_duplicate_match(job_input, posting, fingerprint, reason, 0.98))
                 continue
 
-            if fingerprint.url:
-                seen_urls.add(fingerprint.url)
-            seen_company_title.add(company_title_key)
+            if normalized:
+                seen_urls.add(normalized)
+            if external_key:
+                seen_external_ids.add(external_key)
             if fingerprint.description_hash:
                 seen_hashes.add(fingerprint.description_hash)
+
+            # Prefer lifecycle path when a resolver is configured.
+            if self.lifecycle_resolver is not None:
+                match = await self._process_with_lifecycle(job_input, posting, fingerprint, tracker)
+                matches.append(match)
+                continue
 
             duplicate_check = await self.duplicate_detector.check_duplicate(job_input)
             logger.info("duplicate result: %s for %s", duplicate_check, job_input.title)
@@ -92,9 +113,12 @@ class JobSearchWorkflow:
                 ))
                 continue
 
-            if duplicate_check.confidence_score >= POSSIBLE_DUPLICATE_THRESHOLD:
+            if (
+                duplicate_check.confidence_score >= POSSIBLE_DUPLICATE_THRESHOLD
+                or duplicate_check.possible_canonical_match
+            ):
                 logger.info(
-                    "possible duplicate signal: %s (%s)",
+                    "canonical/possible-duplicate signal: %s (%s)",
                     duplicate_check.reason,
                     duplicate_check.confidence_score,
                 )
@@ -122,7 +146,81 @@ class JobSearchWorkflow:
             )
             matches.append(match)
 
+        if self.lifecycle_resolver is not None:
+            store = getattr(self.lifecycle_resolver, "store", None)
+            if store is not None and hasattr(store, "save_discovery_run"):
+                await tracker.persist(store)
+
         return matches
+
+    async def _process_with_lifecycle(
+        self,
+        job_input: JobInput,
+        posting: NormalizedJobPosting,
+        fingerprint: JobFingerprint,
+        tracker: DiscoveryRunTracker,
+    ) -> JobMatch:
+        assert self.lifecycle_resolver is not None
+        score = self.scoring.score(posting, self.profile)
+        posting.match_score = score
+
+        raw = {
+            "company": job_input.company,
+            "title": job_input.title,
+            "url": job_input.url,
+            "description": job_input.description,
+            "source": job_input.source,
+            "location": job_input.location,
+            "external_job_id": job_input.external_job_id,
+            "posted_date": (
+                job_input.posted_date.isoformat()
+                if job_input.posted_date
+                else (job_input.metadata or {}).get("posted_date")
+            ),
+            "metadata": job_input.metadata or {},
+        }
+        result = await process_discovered_job(
+            raw,
+            self.lifecycle_resolver,
+            match_score=score,
+            persist=True,
+        )
+        tracker.record(result)
+
+        disposition = result.classification.disposition
+        if disposition == PostingDisposition.SAME_POSTING:
+            recommendation = "update_existing"
+            duplicate = True
+            reason = result.classification.reason
+        elif disposition == PostingDisposition.REPOST:
+            recommendation = "save_repost"
+            duplicate = False
+            reason = result.classification.reason
+        else:
+            recommendation = "save"
+            duplicate = False
+            reason = result.classification.reason
+
+        memory_id = None
+        if result.job_posting:
+            memory_id = result.job_posting.get("id")
+        elif result.canonical_job:
+            memory_id = result.canonical_job.get("id")
+
+        return JobMatch(
+            job_input=job_input,
+            posting=posting,
+            fingerprint=fingerprint,
+            decision=JobDecision(
+                match_score=score,
+                duplicate=duplicate,
+                recommendation=recommendation,
+                reason=reason,
+                confidence_score=1.0,
+            ),
+            memory_job_id=memory_id,
+            saved=result.persisted and disposition != PostingDisposition.SAME_POSTING,
+        )
 
     async def _search_all_sources(self) -> list[JobInput]:
         results: list[JobInput] = []

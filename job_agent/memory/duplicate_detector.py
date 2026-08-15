@@ -5,11 +5,11 @@ from typing import Any
 from ..models.types import DuplicateResult, JobFingerprint, JobInput
 from ..memory.client import MemoryStore
 from ..memory.fingerprint import (
-    compute_description_hash,
     normalize_company_key,
     normalize_description_text,
     normalize_title_key,
 )
+from ..lifecycle.url import normalize_url
 from ..utils.normalization import (
     extract_keyword_set,
     extract_role_family,
@@ -22,6 +22,16 @@ POSSIBLE_DUPLICATE_THRESHOLD = 70.0
 
 
 class DuplicateDetector:
+    """Posting-level duplicate detection.
+
+    Automatic duplicates are posting-identity matches only:
+    - same normalized URL
+    - same source + external_job_id
+    - same description_hash (identical JD text rediscovery)
+
+    Same company + normalized title is a *canonical role* signal, not discard.
+    """
+
     def __init__(self, memory_store: MemoryStore):
         self.memory_store = memory_store
 
@@ -37,8 +47,8 @@ class DuplicateDetector:
                 reason="no history available",
             )
 
-        exact_result = self._check_exact_matches(current_fingerprint, history)
-        if exact_result.is_duplicate:
+        exact_result = self._check_exact_matches(current_fingerprint, job_input, history)
+        if exact_result.is_duplicate or exact_result.possible_canonical_match:
             return exact_result
 
         return self._check_similarity(current_fingerprint, history)
@@ -46,20 +56,38 @@ class DuplicateDetector:
     def _check_exact_matches(
         self,
         fingerprint: JobFingerprint,
+        job_input: JobInput,
         history: list[dict[str, Any]],
     ) -> DuplicateResult:
-        for item in history:
-            item_url = item.get("url")
-            item_title = item.get("title", "")
-            item_company = item.get("company", "")
-            item_description_hash = item.get("description_hash")
+        candidate_url = normalize_url(fingerprint.url)
+        candidate_external = job_input.external_job_id or _external_from_metadata(job_input)
 
-            if fingerprint.url and item_url and fingerprint.url == item_url:
+        for item in history:
+            item_url = normalize_url(item.get("url") or item.get("normalized_url"))
+            item_description_hash = item.get("description_hash")
+            item_source = item.get("source")
+            item_external = item.get("external_job_id")
+
+            if candidate_url and item_url and candidate_url == item_url:
                 return DuplicateResult(
                     is_duplicate=True,
                     confidence_score=100.0,
                     matched_job_id=item.get("id"),
                     reason="same URL",
+                )
+
+            if (
+                candidate_external
+                and item_external
+                and job_input.source
+                and item_source == job_input.source
+                and candidate_external == item_external
+            ):
+                return DuplicateResult(
+                    is_duplicate=True,
+                    confidence_score=100.0,
+                    matched_job_id=item.get("id"),
+                    reason="same source and external_job_id",
                 )
 
             if (
@@ -74,15 +102,19 @@ class DuplicateDetector:
                     reason="same description hash",
                 )
 
+            item_company = item.get("company") or item.get("company_name") or ""
+            item_title = item.get("title") or item.get("canonical_title") or ""
             if (
                 fingerprint.company_key == normalize_company_key(item_company)
                 and fingerprint.normalized_title == normalize_title_key(item_title)
             ):
+                # Canonical-role signal only — do NOT auto-discard (may be a repost).
                 return DuplicateResult(
-                    is_duplicate=True,
-                    confidence_score=95.0,
+                    is_duplicate=False,
+                    confidence_score=85.0,
                     matched_job_id=item.get("id"),
-                    reason="same company and normalized title",
+                    reason="same company and normalized title (canonical match; not auto-discard)",
+                    possible_canonical_match=True,
                 )
 
         return DuplicateResult(
@@ -130,13 +162,15 @@ class DuplicateDetector:
             same_company = fingerprint.company_key == existing_fingerprint.company_key
             matched_job_id = item.get("id") if same_company else None
             reason = self._describe_similarity(fingerprint, existing_fingerprint, score)
-            is_duplicate = same_company and score >= AUTOMATIC_DUPLICATE_THRESHOLD
+            # Similarity never auto-discards; lifecycle classifier owns REPOST/NEW_JOB.
+            is_duplicate = False
 
             best_result = DuplicateResult(
                 is_duplicate=is_duplicate,
                 confidence_score=round(score, 2),
                 matched_job_id=matched_job_id,
                 reason=reason,
+                possible_canonical_match=same_company and score >= POSSIBLE_DUPLICATE_THRESHOLD,
             )
 
         return best_result
@@ -149,7 +183,7 @@ class DuplicateDetector:
     ) -> str:
         same_company = candidate.company_key == existing.company_key
         if score >= AUTOMATIC_DUPLICATE_THRESHOLD:
-            return "automatic duplicate based on company, title, and description similarity"
+            return "high similarity within company (canonical signal; not auto-discard)"
         if score >= POSSIBLE_DUPLICATE_THRESHOLD:
             if same_company:
                 return "possible duplicate within same company"
@@ -194,3 +228,21 @@ class DuplicateDetector:
             return 0.0
 
         return len(left_tokens & right_tokens) / max(len(left_tokens), len(right_tokens))
+
+
+def _external_from_metadata(job_input: JobInput) -> str | None:
+    if not job_input.metadata:
+        return None
+    for key in (
+        "external_job_id",
+        "external_id",
+        "job_id",
+        "greenhouse_id",
+        "lever_id",
+        "ashby_id",
+        "linkedin_job_id",
+    ):
+        value = job_input.metadata.get(key)
+        if value:
+            return str(value).strip()
+    return None

@@ -28,6 +28,14 @@ describe("003_job_lifecycle.sql contract", () => {
     }
   });
 
+  it("enforces posting/canonical integrity for applications", () => {
+    expect(migrationSql).toContain("uq_job_postings_id_canonical_job_id");
+    expect(migrationSql).toContain("fk_applications_posting_canonical");
+    expect(migrationSql).toMatch(
+      /FOREIGN KEY \(posting_id, canonical_job_id\)\s+REFERENCES job_postings \(id, canonical_job_id\)/,
+    );
+  });
+
   it("does not require globally unique URLs", () => {
     expect(migrationSql).toMatch(/URL is intentionally NOT globally unique/i);
     expect(migrationSql).toContain("uq_job_postings_source_external_id");

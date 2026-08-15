@@ -43,6 +43,7 @@ vi.mock("@/lib/db/lifecycle", async () => {
       return row;
     }),
     findCanonicalJobsByCompanyTitle: vi.fn(async () => Array.from(canonicalStore.values())),
+    findCanonicalJobsByCompany: vi.fn(async () => Array.from(canonicalStore.values())),
     saveJobPosting: vi.fn(async (input: Record<string, unknown>) => {
       const id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
       const row = { id, is_repost: false, ...input };

@@ -7,6 +7,7 @@ import {
   addApplicationEventSchema,
   touchCanonicalJob,
   findCanonicalJobsByCompanyTitle,
+  findCanonicalJobsByCompany,
   findJobPostingByNormalizedUrl,
   findJobPostingBySourceExternalId,
   getApplication,
@@ -129,6 +130,47 @@ export function registerLifecycleTools(server: McpServer): void {
         return jsonResult({ ok: true, count: jobs.length, canonical_jobs: jobs });
       } catch (error) {
         return errorResult(error instanceof Error ? error.message : "Failed to find canonical jobs");
+      }
+    },
+  );
+
+  server.registerTool(
+    "find_canonical_jobs_by_company",
+    {
+      title: "Find Canonical Jobs By Company",
+      description:
+        "List canonical jobs for a company_key (paginated). Persistence only — does not score similarity." +
+        PERSISTENCE_NOTE,
+      inputSchema: z.object({
+        company_key: z.string().min(1),
+        limit: z.number().int().min(1).max(100).default(100),
+        offset: z.number().int().min(0).default(0),
+      }),
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async ({ company_key, limit, offset }, extra) => {
+      try {
+        assertToolPermission(getAuth(extra), "find_canonical_jobs_by_company");
+        const jobs = await findCanonicalJobsByCompany(
+          company_key,
+          limit ?? 100,
+          offset ?? 0,
+        );
+        return jsonResult({
+          ok: true,
+          count: jobs.length,
+          canonical_jobs: jobs,
+          next_offset: jobs.length === (limit ?? 100) ? (offset ?? 0) + jobs.length : null,
+        });
+      } catch (error) {
+        return errorResult(
+          error instanceof Error ? error.message : "Failed to find canonical jobs by company",
+        );
       }
     },
   );

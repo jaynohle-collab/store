@@ -160,6 +160,22 @@ export async function findCanonicalJobsByCompanyTitle(
   return rows.map((row) => mapRow(row as Record<string, unknown>));
 }
 
+export async function findCanonicalJobsByCompany(
+  companyKey: string,
+  limit = 100,
+  offset = 0,
+): Promise<CanonicalJobRecord[]> {
+  const sql = getSql();
+  const rows = await sql`
+    SELECT * FROM canonical_jobs
+    WHERE company_key = ${companyKey}
+    ORDER BY last_seen_at DESC
+    LIMIT ${limit}
+    OFFSET ${offset}
+  `;
+  return rows.map((row) => mapRow(row as Record<string, unknown>));
+}
+
 export async function saveJobPosting(
   input: z.infer<typeof saveJobPostingSchema>,
 ): Promise<JobPostingRecord> {

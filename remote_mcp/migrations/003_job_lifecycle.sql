@@ -81,6 +81,10 @@ CREATE INDEX IF NOT EXISTS idx_job_postings_last_seen_at
 CREATE INDEX IF NOT EXISTS idx_job_postings_is_repost
   ON job_postings (is_repost);
 
+-- Supports composite FK from applications(posting_id, canonical_job_id).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_job_postings_id_canonical_job_id
+  ON job_postings (id, canonical_job_id);
+
 -- URL is intentionally NOT globally unique (reposts / mirrors allowed).
 -- Source-scoped external IDs are unique when present.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_job_postings_source_external_id
@@ -101,7 +105,11 @@ CREATE TABLE IF NOT EXISTS applications (
   cover_letter_version TEXT,
   notes TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  -- Prevent applications from referencing a posting under the wrong canonical job.
+  CONSTRAINT fk_applications_posting_canonical
+    FOREIGN KEY (posting_id, canonical_job_id)
+    REFERENCES job_postings (id, canonical_job_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_applications_canonical_job_id

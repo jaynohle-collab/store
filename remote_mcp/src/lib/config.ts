@@ -20,6 +20,7 @@ export const TOOL_PERMISSIONS: Record<string, JobScope> = {
   save_canonical_job: SCOPES.WRITE,
   get_canonical_job: SCOPES.READ,
   find_canonical_jobs: SCOPES.READ,
+  find_canonical_jobs_by_company: SCOPES.READ,
   touch_canonical_job: SCOPES.WRITE,
   save_job_posting: SCOPES.WRITE,
   update_job_posting: SCOPES.WRITE,

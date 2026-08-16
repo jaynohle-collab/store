@@ -1,48 +1,47 @@
 import { NextResponse } from "next/server";
+import { z } from "zod";
 
+import { withDashboardApi, parseSearchParams, zodBadRequest } from "@/lib/dashboard/api";
+import { markAppliedBodySchema, paginationSchema } from "@/lib/dashboard/validation";
 import { listApplicationsPage, markApplied } from "@/lib/db/dashboard";
 
 export const dynamic = "force-dynamic";
 
+const applicationsQuerySchema = paginationSchema.extend({
+  status: z.string().max(64).optional(),
+  interviewing: z.enum(["0", "1"]).optional(),
+  q: z.string().max(512).optional(),
+});
+
 export async function GET(req: Request) {
-  try {
+  return withDashboardApi(async () => {
     const url = new URL(req.url);
+    const parsed = parseSearchParams(applicationsQuerySchema, url);
+    if ("response" in parsed) return parsed.response;
+
     const page = await listApplicationsPage({
-      status: url.searchParams.get("status") || undefined,
-      interviewing: url.searchParams.get("interviewing") === "1",
-      q: url.searchParams.get("q") || undefined,
-      limit: url.searchParams.get("limit") ? Number(url.searchParams.get("limit")) : 50,
-      offset: url.searchParams.get("offset") ? Number(url.searchParams.get("offset")) : 0,
+      status: parsed.data.status,
+      interviewing: parsed.data.interviewing === "1",
+      q: parsed.data.q,
+      limit: parsed.data.limit,
+      offset: parsed.data.offset,
     });
     return NextResponse.json({ ok: true, ...page });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to list applications";
-    return NextResponse.json({ ok: false, error: message }, { status: 500 });
-  }
+  });
 }
 
 export async function POST(req: Request) {
-  try {
-    const body = (await req.json()) as {
-      posting_id?: string;
-      application_url?: string;
-      resume_version?: string;
-      notes?: string;
-      applied_at?: string;
-    };
-    if (!body.posting_id) {
-      return NextResponse.json({ ok: false, error: "posting_id required" }, { status: 400 });
-    }
+  return withDashboardApi(async () => {
+    const body = markAppliedBodySchema.safeParse(await req.json());
+    if (!body.success) return zodBadRequest(body.error);
+
     const result = await markApplied({
-      postingId: body.posting_id,
-      applicationUrl: body.application_url,
-      resumeVersion: body.resume_version,
-      notes: body.notes,
-      appliedAt: body.applied_at,
+      postingId: body.data.posting_id,
+      applicationUrl: body.data.application_url,
+      resumeVersion: body.data.resume_version,
+      notes: body.data.notes,
+      appliedAt: body.data.applied_at,
     });
     return NextResponse.json({ ok: true, ...result });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to mark applied";
-    return NextResponse.json({ ok: false, error: message }, { status: 500 });
-  }
+  });
 }

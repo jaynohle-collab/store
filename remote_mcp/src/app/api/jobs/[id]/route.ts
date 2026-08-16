@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 
+import { withDashboardApi, zodBadRequest } from "@/lib/dashboard/api";
+import { jobPatchBodySchema, uuidSchema } from "@/lib/dashboard/validation";
 import { getDashboardJob, ignorePosting } from "@/lib/db/dashboard";
 
 export const dynamic = "force-dynamic";
@@ -7,33 +9,32 @@ export const dynamic = "force-dynamic";
 type Ctx = { params: Promise<{ id: string }> };
 
 export async function GET(_req: Request, ctx: Ctx) {
-  try {
+  return withDashboardApi(async () => {
     const { id } = await ctx.params;
-    const job = await getDashboardJob(id);
+    const idParsed = uuidSchema.safeParse(id);
+    if (!idParsed.success) return zodBadRequest(idParsed.error);
+
+    const job = await getDashboardJob(idParsed.data);
     if (!job) {
       return NextResponse.json({ ok: false, found: false, id }, { status: 404 });
     }
     return NextResponse.json({ ok: true, found: true, job });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to get job";
-    return NextResponse.json({ ok: false, error: message }, { status: 500 });
-  }
+  });
 }
 
 export async function PATCH(req: Request, ctx: Ctx) {
-  try {
+  return withDashboardApi(async () => {
     const { id } = await ctx.params;
-    const body = (await req.json()) as { action?: string };
-    if (body.action === "ignore") {
-      const posting = await ignorePosting(id);
-      if (!posting) {
-        return NextResponse.json({ ok: false, found: false }, { status: 404 });
-      }
-      return NextResponse.json({ ok: true, posting });
+    const idParsed = uuidSchema.safeParse(id);
+    if (!idParsed.success) return zodBadRequest(idParsed.error);
+
+    const body = jobPatchBodySchema.safeParse(await req.json());
+    if (!body.success) return zodBadRequest(body.error);
+
+    const posting = await ignorePosting(idParsed.data);
+    if (!posting) {
+      return NextResponse.json({ ok: false, found: false }, { status: 404 });
     }
-    return NextResponse.json({ ok: false, error: "Unknown action" }, { status: 400 });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to update job";
-    return NextResponse.json({ ok: false, error: message }, { status: 500 });
-  }
+    return NextResponse.json({ ok: true, posting });
+  });
 }

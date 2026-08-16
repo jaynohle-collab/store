@@ -114,7 +114,8 @@ CREATE TABLE IF NOT EXISTS applications (
 
 CREATE INDEX IF NOT EXISTS idx_applications_canonical_job_id
   ON applications (canonical_job_id);
-CREATE INDEX IF NOT EXISTS idx_applications_posting_id
+-- One application per posting occurrence (reposts use a new posting_id).
+CREATE UNIQUE INDEX IF NOT EXISTS uq_applications_posting_id
   ON applications (posting_id);
 CREATE INDEX IF NOT EXISTS idx_applications_status
   ON applications (status);

@@ -1,35 +1,37 @@
 import { NextResponse } from "next/server";
 
+import { withDashboardApi, parseSearchParams } from "@/lib/dashboard/api";
+import { jobsQuerySchema } from "@/lib/dashboard/validation";
 import { listDashboardJobs, type JobListFilters } from "@/lib/db/dashboard";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
-  try {
+  return withDashboardApi(async () => {
     const url = new URL(req.url);
-    const sp = url.searchParams;
+    const parsed = parseSearchParams(jobsQuerySchema, url);
+    if ("response" in parsed) return parsed.response;
+
+    const sp = parsed.data;
     const filters: JobListFilters = {
-      q: sp.get("q") || undefined,
-      dateFrom: sp.get("date_from") || undefined,
-      dateTo: sp.get("date_to") || undefined,
-      minMatch: sp.get("min_match") ? Number(sp.get("min_match")) : undefined,
-      applicationStatus: sp.get("application_status") || undefined,
-      lifecycle: (sp.get("lifecycle") as JobListFilters["lifecycle"]) || undefined,
-      remoteStatus: sp.get("remote_status") || undefined,
-      company: sp.get("company") || undefined,
-      source: sp.get("source") || undefined,
-      toApply: sp.get("to_apply") === "1",
-      applied: sp.get("applied") === "1",
-      interviewing: sp.get("interviewing") === "1",
-      reposted: sp.get("reposted") === "1",
-      limit: sp.get("limit") ? Number(sp.get("limit")) : 50,
-      offset: sp.get("offset") ? Number(sp.get("offset")) : 0,
-      sort: (sp.get("sort") as JobListFilters["sort"]) || "newest",
+      q: sp.q,
+      dateFrom: sp.date_from,
+      dateTo: sp.date_to,
+      minMatch: sp.min_match,
+      applicationStatus: sp.application_status,
+      lifecycle: sp.lifecycle,
+      remoteStatus: sp.remote_status,
+      company: sp.company,
+      source: sp.source,
+      toApply: sp.to_apply === "1",
+      applied: sp.applied === "1",
+      interviewing: sp.interviewing === "1",
+      reposted: sp.reposted === "1",
+      limit: sp.limit,
+      offset: sp.offset,
+      sort: sp.sort,
     };
     const page = await listDashboardJobs(filters);
     return NextResponse.json({ ok: true, ...page });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Failed to list jobs";
-    return NextResponse.json({ ok: false, error: message }, { status: 500 });
-  }
+  });
 }

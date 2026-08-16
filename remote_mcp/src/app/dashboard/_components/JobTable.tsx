@@ -1,6 +1,10 @@
 import Link from "next/link";
 
+import { formatMatch } from "@/lib/dashboard/display";
+
 import { MarkAppliedButton, IgnoreButton } from "./Actions";
+
+export { formatMatch } from "@/lib/dashboard/display";
 
 export function Badge({ kind, children }: { kind: string; children: React.ReactNode }) {
   return <span className={`badge badge-${kind}`}>{children}</span>;
@@ -28,13 +32,6 @@ export function JobBadges(job: Record<string, unknown>) {
 export function formatDate(value: unknown): string {
   if (!value) return "—";
   return String(value).slice(0, 10);
-}
-
-export function formatMatch(value: unknown): string {
-  if (value == null || value === "") return "—";
-  const n = Number(value);
-  if (!Number.isFinite(n)) return "—";
-  return `${Math.round(n)}`;
 }
 
 export function JobTable({

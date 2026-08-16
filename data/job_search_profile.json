@@ -1,0 +1,57 @@
+{
+  "profile_version": "jay-ai-v1",
+  "target_roles": [
+    "Senior AI Engineer",
+    "Staff AI Engineer",
+    "Principal AI Engineer",
+    "AI Infrastructure Engineer",
+    "Agent Platform Engineer",
+    "Backend Engineer AI Focus",
+    "Forward Deployed Engineer",
+    "Generative AI Engineer",
+    "LLM Platform Engineer"
+  ],
+  "priority_skills": [
+    "LLM",
+    "Large Language Models",
+    "AI Agents",
+    "Agent orchestration",
+    "MCP",
+    "RAG",
+    "Retrieval",
+    "AI infrastructure",
+    "Distributed systems",
+    "Backend systems",
+    "Cloud platforms",
+    "Developer productivity",
+    "Healthcare AI",
+    "Enterprise AI",
+    "LangGraph"
+  ],
+  "preferred_locations": [
+    "United States",
+    "Remote"
+  ],
+  "preferred_seniority": [
+    "Senior",
+    "Staff",
+    "Principal"
+  ],
+  "remote_first": true,
+  "reject": {
+    "junior": true,
+    "entry_level": true,
+    "internship": true,
+    "frontend_only": true,
+    "pure_devops_sre": true,
+    "nyc_onsite_only": true
+  },
+  "weights": {
+    "role_fit": 25,
+    "ai_technical_fit": 30,
+    "backend_platform_production": 20,
+    "seniority": 15,
+    "remote_location": 10
+  },
+  "high_match_threshold": 70
+}

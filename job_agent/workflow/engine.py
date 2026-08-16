@@ -124,7 +124,7 @@ class JobSearchWorkflow:
                     duplicate_check.confidence_score,
                 )
 
-            score = self.scoring.score(posting, self.profile)
+            score, score_breakdown = self._score_posting(posting)
             posting.match_score = score
             logger.info("score: %s for %s", score, job_input.title)
 
@@ -162,7 +162,7 @@ class JobSearchWorkflow:
         tracker: DiscoveryRunTracker,
     ) -> JobMatch:
         assert self.lifecycle_resolver is not None
-        score = self.scoring.score(posting, self.profile)
+        score, score_breakdown = self._score_posting(posting)
         posting.match_score = score
 
         metadata = job_input.metadata or {}
@@ -216,15 +216,18 @@ class JobSearchWorkflow:
             and result.job_posting
             and result.job_posting.get("id")
         ):
+            eval_metadata = {
+                "disposition": disposition.value,
+                "canonical_similarity_score": result.classification.canonical_similarity_score,
+            }
+            if score_breakdown is not None:
+                eval_metadata["score_breakdown"] = score_breakdown
             await self.evaluation_service.persist_evaluation(
                 posting_id=str(result.job_posting["id"]),
                 match_score=score,
                 recommendation=recommendation,
                 reason=reason,
-                metadata={
-                    "disposition": disposition.value,
-                    "canonical_similarity_score": result.classification.canonical_similarity_score,
-                },
+                metadata=eval_metadata,
             )
 
         return JobMatch(
@@ -276,3 +279,15 @@ class JobSearchWorkflow:
 
     def _fingerprint(self, posting: NormalizedJobPosting) -> JobFingerprint:
         return JobFingerprint.from_normalized_posting(posting)
+
+    def _score_posting(
+        self, posting: NormalizedJobPosting
+    ) -> tuple[float, dict[str, object] | None]:
+        """Score candidate fit. Never feeds into lifecycle disposition."""
+        detailed = getattr(self.scoring, "score_detailed", None)
+        if callable(detailed):
+            breakdown = detailed(posting, self.profile)
+            payload = breakdown.as_dict() if hasattr(breakdown, "as_dict") else None
+            total = float(getattr(breakdown, "total", breakdown))
+            return total, payload
+        return float(self.scoring.score(posting, self.profile)), None

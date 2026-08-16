@@ -10,14 +10,22 @@ from job_agent.integrations.lifecycle_store import RemoteLifecycleStore
 from job_agent.integrations.persistence import get_persistence_mode
 from job_agent.integrations.remote_mcp_client import RemoteMcpMemoryAdapter
 from job_agent.lifecycle import CanonicalJobResolver
+from job_agent.lifecycle.evaluation_service import (
+    PROFILE_VERSION as DEFAULT_PROFILE_VERSION,
+    SCORING_VERSION as DEFAULT_SCORING_VERSION,
+    EvaluationService,
+)
 from job_agent.memory.client import MemoryStore
 from job_agent.models.types import JobInput, JobSearchProfile
-from job_agent.ranking.scoring import SimpleScoreCalculator
+from job_agent.profile import load_job_search_profile
+from job_agent.ranking.scoring import ProfileScoreCalculator, ScoreCalculator
 from job_agent.workflow.engine import JobSearchWorkflow
 from job_agent.workflow.example_gpt_input import SimpleJobNormalizer
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+DEFAULT_PROFILE_PATH = Path(__file__).resolve().parents[2] / "data" / "job_search_profile.json"
 
 
 @dataclass
@@ -56,12 +64,25 @@ def load_gpt_jobs_from_file(path: Path) -> list[JobInput]:
     return loader.load_jobs()
 
 
+def resolve_job_search_profile(
+    profile: JobSearchProfile | None = None,
+    profile_file: Path | None = None,
+) -> JobSearchProfile:
+    if profile is not None:
+        return profile
+    path = profile_file or DEFAULT_PROFILE_PATH
+    return load_job_search_profile(path)
+
+
 def run_daily_job_run(
     job_file: Path,
     memory_store: MemoryStore | None = None,
     *,
     persistence_mode: str | None = None,
     lifecycle_store: Any | None = None,
+    profile: JobSearchProfile | None = None,
+    profile_file: Path | None = None,
+    scoring: ScoreCalculator | None = None,
 ) -> dict[str, object]:
     """Run the daily GPT job workflow.
 
@@ -76,6 +97,11 @@ def run_daily_job_run(
     lifecycle_store:
         Optional injected lifecycle store for remote mode (tests). When omitted
         in remote mode, a real ``RemoteLifecycleStore`` is constructed.
+    profile / profile_file:
+        Optional search profile injection. Production loads
+        ``data/job_search_profile.json``.
+    scoring:
+        Optional scorer injection. Production uses ``ProfileScoreCalculator``.
     """
     try:
         job_inputs = load_gpt_jobs_from_file(job_file)
@@ -84,6 +110,7 @@ def run_daily_job_run(
         return {
             "total_jobs_received": 0,
             "duplicates": 0,
+            "reposts": 0,
             "new_jobs": 0,
             "saved": 0,
             "top_matches": [],
@@ -97,33 +124,36 @@ def run_daily_job_run(
         mode = "remote"
 
     lifecycle_resolver = None
+    evaluation_service = None
     if memory_store is None and mode == "remote":
         store = lifecycle_store if lifecycle_store is not None else RemoteLifecycleStore()
         memory_store = MemoryStore(
             tool_client=RemoteMcpMemoryAdapter(store.client)
         )
         lifecycle_resolver = CanonicalJobResolver(store)
+        resolved_profile = resolve_job_search_profile(profile, profile_file)
+        evaluation_service = EvaluationService(
+            store,
+            scoring_version=DEFAULT_SCORING_VERSION,
+            profile_version=resolved_profile.profile_version or DEFAULT_PROFILE_VERSION,
+        )
     else:
         tool_client = memory_store.tool_client if memory_store else MockToolClient()
         memory_store = memory_store or MemoryStore(tool_client=tool_client)
+        resolved_profile = resolve_job_search_profile(profile, profile_file)
 
     normalizer = SimpleJobNormalizer()
-    scoring = SimpleScoreCalculator()
+    scorer = scoring if scoring is not None else ProfileScoreCalculator()
     provider = StaticJobProvider(jobs=job_inputs)
-    profile = JobSearchProfile(
-        candidate_name="Daily Candidate",
-        keywords=["AI", "machine learning", "LLM"],
-        location="Remote",
-        remote=True,
-    )
 
     workflow = JobSearchWorkflow(
-        profile=profile,
+        profile=resolved_profile,
         providers=[provider],
         normalizer=normalizer,
-        scoring=scoring,
+        scoring=scorer,
         memory_store=memory_store,
         lifecycle_resolver=lifecycle_resolver,
+        evaluation_service=evaluation_service,
     )
 
     matches = __import__("asyncio").run(workflow.execute())

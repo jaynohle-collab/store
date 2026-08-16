@@ -57,9 +57,9 @@ export function getLocalDayBounds(
 }
 
 export function getActiveScoringVersion(): string {
-  return process.env.DASHBOARD_SCORING_VERSION?.trim() || "simple-v1";
+  return process.env.DASHBOARD_SCORING_VERSION?.trim() || "profile-v1";
 }
 
 export function getActiveProfileVersion(): string {
-  return process.env.DASHBOARD_PROFILE_VERSION?.trim() || "default-v1";
+  return process.env.DASHBOARD_PROFILE_VERSION?.trim() || "jay-ai-v1";
 }

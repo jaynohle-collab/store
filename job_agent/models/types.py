@@ -11,6 +11,34 @@ from ..utils.normalization import (
 )
 
 
+@dataclass(frozen=True)
+class RejectionConfig:
+    junior: bool = True
+    entry_level: bool = True
+    internship: bool = True
+    frontend_only: bool = True
+    pure_devops_sre: bool = True
+    nyc_onsite_only: bool = True
+
+
+@dataclass(frozen=True)
+class ScoringWeights:
+    role_fit: float = 25.0
+    ai_technical_fit: float = 30.0
+    backend_platform_production: float = 20.0
+    seniority: float = 15.0
+    remote_location: float = 10.0
+
+    def total(self) -> float:
+        return (
+            self.role_fit
+            + self.ai_technical_fit
+            + self.backend_platform_production
+            + self.seniority
+            + self.remote_location
+        )
+
+
 @dataclass
 class JobSearchProfile:
     candidate_name: str
@@ -22,6 +50,16 @@ class JobSearchProfile:
     preferred_sources: list[str] | None = None
     search_interval_days: int = 1
     reviewed_job_ids: list[int] | None = None
+    # Optional machine-readable profile fields (backward compatible).
+    profile_version: str | None = None
+    target_roles: list[str] | None = None
+    priority_skills: list[str] | None = None
+    preferred_locations: list[str] | None = None
+    preferred_seniority: list[str] | None = None
+    remote_first: bool = False
+    reject: RejectionConfig | None = None
+    weights: ScoringWeights | None = None
+    high_match_threshold: float | None = None
 
 
 @dataclass
@@ -70,6 +108,7 @@ class NormalizedJobPosting:
     posted_date: date | None = None
     status: str = "new"
     match_score: float | None = None
+    remote_status: str | None = None
 
 
 @dataclass

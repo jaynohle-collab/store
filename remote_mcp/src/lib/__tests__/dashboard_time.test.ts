@@ -60,9 +60,9 @@ describe("active scoring/profile versions", () => {
     delete process.env.DASHBOARD_PROFILE_VERSION;
   });
 
-  it("defaults to simple-v1 / default-v1", () => {
-    expect(getActiveScoringVersion()).toBe("simple-v1");
-    expect(getActiveProfileVersion()).toBe("default-v1");
+  it("defaults to profile-v1 / jay-ai-v1", () => {
+    expect(getActiveScoringVersion()).toBe("profile-v1");
+    expect(getActiveProfileVersion()).toBe("jay-ai-v1");
   });
 
   it("reads configured active versions", () => {

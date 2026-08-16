@@ -1,5 +1,7 @@
 import Link from "next/link";
 
+import { getDashboardSessionUser } from "@/lib/dashboard/auth";
+
 const NAV = [
   { href: "/dashboard", label: "Overview" },
   { href: "/dashboard/to-apply", label: "To Apply" },
@@ -10,7 +12,13 @@ const NAV = [
   { href: "/dashboard/discovery", label: "Discovery Runs" },
 ] as const;
 
-export default function DashboardLayout({ children }: { children: React.ReactNode }) {
+export default async function DashboardLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  const user = await getDashboardSessionUser();
+
   return (
     <div className="dash-shell">
       <aside className="dash-nav">
@@ -21,6 +29,9 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
           </Link>
         ))}
         <div style={{ marginTop: "auto", paddingTop: "1.5rem" }} className="muted">
+          {user?.email ? <div style={{ marginBottom: "0.5rem" }}>{user.email}</div> : null}
+          <a href="/auth/logout">Sign out</a>
+          {" · "}
           <Link href="/">MCP home</Link>
         </div>
       </aside>

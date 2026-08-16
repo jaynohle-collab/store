@@ -165,6 +165,49 @@ END
 $$;
 
 -- ---------------------------------------------------------------------------
+-- Align optional legacy columns with 001_initial.sql before type conversion.
+--
+-- Live Neon PoC shape observed in production testing:
+--   posted_date TEXT NOT NULL DEFAULT ''
+-- Other optional text fields may also be NOT NULL with empty-string defaults.
+-- 001 defines these as nullable with no default:
+--   location, source, description, description_hash,
+--   remote_status, salary, posted_date
+--
+-- DROP DEFAULT before TIMESTAMPTZ conversion: PostgreSQL rejects casting the
+-- old text default '' to TIMESTAMPTZ even when every row value is valid ISO.
+-- DROP NOT NULL so NULLIF(..., '') can safely produce NULL for blank values.
+-- Do NOT restore empty-string defaults afterward.
+-- ---------------------------------------------------------------------------
+DO $$
+DECLARE
+  opt_col text;
+BEGIN
+  FOREACH opt_col IN ARRAY ARRAY[
+    'location',
+    'source',
+    'description',
+    'description_hash',
+    'remote_status',
+    'salary',
+    'posted_date'
+  ]
+  LOOP
+    IF EXISTS (
+      SELECT 1
+      FROM information_schema.columns
+      WHERE table_schema = current_schema()
+        AND table_name = 'jobs'
+        AND column_name = opt_col
+    ) THEN
+      EXECUTE format('ALTER TABLE jobs ALTER COLUMN %I DROP DEFAULT', opt_col);
+      EXECUTE format('ALTER TABLE jobs ALTER COLUMN %I DROP NOT NULL', opt_col);
+    END IF;
+  END LOOP;
+END
+$$;
+
+-- ---------------------------------------------------------------------------
 -- Repair posted_date / created_at / updated_at → TIMESTAMPTZ
 --
 -- TIMESTAMP WITHOUT TIME ZONE is NOT auto-converted: AT TIME ZONE requires an
@@ -196,6 +239,8 @@ BEGIN
         'Cannot convert jobs.% from TIMESTAMP WITHOUT TIME ZONE to TIMESTAMPTZ: an explicit timezone assumption is required, and this repository does not document UTC (or any other) semantics for legacy PoC timestamps. Existing data was NOT modified. Convert the column manually with an explicit zone only after confirming the historical meaning (example: ALTER TABLE jobs ALTER COLUMN % TYPE TIMESTAMPTZ USING % AT TIME ZONE ''UTC''), then re-run this migration.',
         col_name, col_name, col_name;
     ELSIF col_udt = 'date' THEN
+      -- Defensive: drop any leftover incompatible default before the cast.
+      EXECUTE format('ALTER TABLE jobs ALTER COLUMN %I DROP DEFAULT', col_name);
       EXECUTE format(
         'ALTER TABLE jobs ALTER COLUMN %I TYPE TIMESTAMPTZ USING %I::timestamptz',
         col_name, col_name
@@ -219,6 +264,10 @@ BEGIN
           'Cannot convert jobs.% from % (%) to TIMESTAMPTZ: % non-null value(s) are not safely convertible (example: %). Existing data was NOT modified.',
           col_name, col_data_type, col_udt, invalid_count, sample_invalid;
       END IF;
+
+      -- Live PoC: posted_date TEXT NOT NULL DEFAULT '' fails unless DEFAULT is
+      -- dropped before TYPE TIMESTAMPTZ. Blank values become NULL via NULLIF.
+      EXECUTE format('ALTER TABLE jobs ALTER COLUMN %I DROP DEFAULT', col_name);
 
       BEGIN
         EXECUTE format(
@@ -297,6 +346,15 @@ ALTER TABLE jobs ALTER COLUMN preferred_skills SET DEFAULT '[]'::jsonb;
 ALTER TABLE jobs ALTER COLUMN created_at SET DEFAULT NOW();
 ALTER TABLE jobs ALTER COLUMN updated_at SET DEFAULT NOW();
 ALTER TABLE jobs ALTER COLUMN id SET DEFAULT gen_random_uuid();
+
+-- Enforce 001_initial.sql nullability for repaired required columns.
+-- Must run AFTER NULL backfills so partial PoC schemas (for example a missing
+-- updated_at that was just ADDed as nullable TIMESTAMPTZ DEFAULT NOW()) remain
+-- safely migratable. Do NOT re-apply NOT NULL to optional legacy fields.
+ALTER TABLE jobs ALTER COLUMN required_skills SET NOT NULL;
+ALTER TABLE jobs ALTER COLUMN preferred_skills SET NOT NULL;
+ALTER TABLE jobs ALTER COLUMN created_at SET NOT NULL;
+ALTER TABLE jobs ALTER COLUMN updated_at SET NOT NULL;
 
 -- description_hash remains TEXT.
 

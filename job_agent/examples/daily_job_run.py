@@ -130,8 +130,13 @@ def run_daily_job_run(
 
     total = len(job_inputs)
     duplicates = sum(1 for match in matches if match.decision.duplicate)
+    reposts = sum(
+        1 for match in matches if match.decision.recommendation == "save_repost"
+    )
+    new_jobs = sum(
+        1 for match in matches if match.decision.recommendation == "save"
+    )
     saved = sum(1 for match in matches if match.saved)
-    new_jobs = total - duplicates
 
     top_matches = [
         {
@@ -147,6 +152,7 @@ def run_daily_job_run(
     report = {
         "total_jobs_received": total,
         "duplicates": duplicates,
+        "reposts": reposts,
         "new_jobs": new_jobs,
         "saved": saved,
         "top_matches": top_matches,
@@ -160,6 +166,7 @@ def print_daily_report(report: dict[str, object]) -> None:
     print()
     print(f"Total jobs received: {report['total_jobs_received']}")
     print(f"Duplicates: {report['duplicates']}")
+    print(f"Reposts: {report.get('reposts', 0)}")
     print(f"New jobs: {report['new_jobs']}")
     print(f"Saved: {report['saved']}")
     print()

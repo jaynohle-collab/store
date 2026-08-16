@@ -3,9 +3,13 @@ import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from job_agent.ingestion.gpt_loader import GPTJobLoader, GPTJobIngestionError
+from job_agent.integrations.lifecycle_store import RemoteLifecycleStore
+from job_agent.integrations.persistence import get_persistence_mode
+from job_agent.integrations.remote_mcp_client import RemoteMcpMemoryAdapter
+from job_agent.lifecycle import CanonicalJobResolver
 from job_agent.memory.client import MemoryStore
 from job_agent.models.types import JobInput, JobSearchProfile
 from job_agent.ranking.scoring import SimpleScoreCalculator
@@ -52,7 +56,27 @@ def load_gpt_jobs_from_file(path: Path) -> list[JobInput]:
     return loader.load_jobs()
 
 
-def run_daily_job_run(job_file: Path, memory_store: MemoryStore | None = None) -> dict[str, object]:
+def run_daily_job_run(
+    job_file: Path,
+    memory_store: MemoryStore | None = None,
+    *,
+    persistence_mode: str | None = None,
+    lifecycle_store: Any | None = None,
+) -> dict[str, object]:
+    """Run the daily GPT job workflow.
+
+    Parameters
+    ----------
+    memory_store:
+        When provided, forces the local/legacy memory path and never constructs
+        a remote MCP client — regardless of ``JOB_PERSISTENCE_MODE``.
+    persistence_mode:
+        Optional override for tests (``\"local\"`` / ``\"remote\"``). Defaults to
+        ``get_persistence_mode()`` from the environment.
+    lifecycle_store:
+        Optional injected lifecycle store for remote mode (tests). When omitted
+        in remote mode, a real ``RemoteLifecycleStore`` is constructed.
+    """
     try:
         job_inputs = load_gpt_jobs_from_file(job_file)
     except (json.JSONDecodeError, GPTJobIngestionError) as exc:
@@ -68,8 +92,20 @@ def run_daily_job_run(job_file: Path, memory_store: MemoryStore | None = None) -
 
     logger.info("Loaded %s GPT job records", len(job_inputs))
 
-    tool_client = memory_store.tool_client if memory_store else MockToolClient()
-    memory_store = memory_store or MemoryStore(tool_client=tool_client)
+    mode = (persistence_mode or get_persistence_mode()).strip().lower()
+    if mode in {"neon", "mcp"}:
+        mode = "remote"
+
+    lifecycle_resolver = None
+    if memory_store is None and mode == "remote":
+        store = lifecycle_store if lifecycle_store is not None else RemoteLifecycleStore()
+        memory_store = MemoryStore(
+            tool_client=RemoteMcpMemoryAdapter(store.client)
+        )
+        lifecycle_resolver = CanonicalJobResolver(store)
+    else:
+        tool_client = memory_store.tool_client if memory_store else MockToolClient()
+        memory_store = memory_store or MemoryStore(tool_client=tool_client)
 
     normalizer = SimpleJobNormalizer()
     scoring = SimpleScoreCalculator()
@@ -87,6 +123,7 @@ def run_daily_job_run(job_file: Path, memory_store: MemoryStore | None = None) -
         normalizer=normalizer,
         scoring=scoring,
         memory_store=memory_store,
+        lifecycle_resolver=lifecycle_resolver,
     )
 
     matches = __import__("asyncio").run(workflow.execute())

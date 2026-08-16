@@ -35,8 +35,27 @@ class GPTJobLoaderTests(unittest.TestCase):
         self.assertEqual(job_inputs[0].source, "gpt")
         self.assertEqual(job_inputs[0].metadata["required_skills"], "python, ml")
         self.assertEqual(job_inputs[0].metadata["preferred_skills"], "nlp")
-        self.assertEqual(job_inputs[0].metadata["remote_status"], "True")
+        self.assertEqual(job_inputs[0].metadata["remote_status"], "Remote")
         self.assertEqual(job_inputs[0].metadata["salary"], "$120k")
+
+    def test_load_jobs_preserves_string_remote_status(self):
+        payload = {
+            "jobs": [
+                {
+                    "company": "Example Corp",
+                    "title": "Staff AI Engineer",
+                    "url": "https://example.com/job/2",
+                    "description": "Build AI infrastructure.",
+                    "location": "San Francisco, CA",
+                    "source": "gpt",
+                    "remote_status": "Hybrid",
+                }
+            ]
+        }
+
+        job_inputs = GPTJobLoader(payload).load_jobs()
+
+        self.assertEqual(job_inputs[0].metadata["remote_status"], "Hybrid")
 
     def test_load_jobs_missing_required_field_raises_error(self):
         payload = {

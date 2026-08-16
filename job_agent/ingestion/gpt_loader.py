@@ -10,6 +10,22 @@ class GPTJobIngestionError(ValueError):
     pass
 
 
+def _normalize_remote_status(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return "Remote" if value else "Onsite"
+    text = str(value).strip()
+    if not text:
+        return None
+    lowered = text.lower()
+    if lowered in {"true", "yes"}:
+        return "Remote"
+    if lowered in {"false", "no"}:
+        return "Onsite"
+    return text
+
+
 @dataclass
 class GPTJobRecord:
     company: str
@@ -20,7 +36,7 @@ class GPTJobRecord:
     source: str | None = None
     required_skills: list[str] | None = None
     preferred_skills: list[str] | None = None
-    remote_status: bool | None = None
+    remote_status: str | None = None
     salary: str | None = None
     posted_date: str | None = None
     external_job_id: str | None = None
@@ -54,7 +70,7 @@ class GPTJobRecord:
             source=str(data["source"]).strip() if data.get("source") else None,
             required_skills=list(data["required_skills"]) if data.get("required_skills") else None,
             preferred_skills=list(data["preferred_skills"]) if data.get("preferred_skills") else None,
-            remote_status=bool(data["remote_status"]) if data.get("remote_status") is not None else None,
+            remote_status=_normalize_remote_status(data.get("remote_status")),
             salary=str(data["salary"]).strip() if data.get("salary") else None,
             posted_date=str(data["posted_date"]).strip() if data.get("posted_date") else None,
             external_job_id=str(external).strip() if external else None,

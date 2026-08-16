@@ -347,6 +347,15 @@ ALTER TABLE jobs ALTER COLUMN created_at SET DEFAULT NOW();
 ALTER TABLE jobs ALTER COLUMN updated_at SET DEFAULT NOW();
 ALTER TABLE jobs ALTER COLUMN id SET DEFAULT gen_random_uuid();
 
+-- Enforce 001_initial.sql nullability for repaired required columns.
+-- Must run AFTER NULL backfills so partial PoC schemas (for example a missing
+-- updated_at that was just ADDed as nullable TIMESTAMPTZ DEFAULT NOW()) remain
+-- safely migratable. Do NOT re-apply NOT NULL to optional legacy fields.
+ALTER TABLE jobs ALTER COLUMN required_skills SET NOT NULL;
+ALTER TABLE jobs ALTER COLUMN preferred_skills SET NOT NULL;
+ALTER TABLE jobs ALTER COLUMN created_at SET NOT NULL;
+ALTER TABLE jobs ALTER COLUMN updated_at SET NOT NULL;
+
 -- description_hash remains TEXT.
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_storage_id ON jobs (id);

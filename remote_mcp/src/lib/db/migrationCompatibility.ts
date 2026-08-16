@@ -39,12 +39,42 @@ export const REQUIRED_LEGACY_JOB_COLUMNS = [
   "updated_at",
 ] as const;
 
+/**
+ * Required columns that 002 may ADD as nullable (with defaults) on partial PoC
+ * schemas, then must SET NOT NULL only after NULL backfills succeed.
+ */
+export const REQUIRED_COLUMNS_ENFORCED_AFTER_REPAIR = [
+  "required_skills",
+  "preferred_skills",
+  "created_at",
+  "updated_at",
+] as const;
+
 /** Live Neon PoC shape that previously broke posted_date conversion. */
 export const LIVE_POC_POSTED_DATE_COLUMN = {
   udtName: "text",
   dataType: "text",
   isNullable: "NO",
   columnDefault: "''::text",
+} as const;
+
+/** Expected nullability after a successful 002 run (matches 001_initial.sql). */
+export const POST_MIGRATION_NULLABILITY = {
+  requiredNotNull: [
+    "required_skills",
+    "preferred_skills",
+    "created_at",
+    "updated_at",
+  ],
+  optionalNullable: [
+    "location",
+    "source",
+    "description",
+    "description_hash",
+    "remote_status",
+    "salary",
+    "posted_date",
+  ],
 } as const;
 
 export function isValidUuidString(value: string): boolean {

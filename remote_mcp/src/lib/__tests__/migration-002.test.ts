@@ -5,6 +5,8 @@ import { describe, expect, it } from "vitest";
 import {
   LIVE_POC_POSTED_DATE_COLUMN,
   OPTIONAL_LEGACY_JOB_COLUMNS,
+  POST_MIGRATION_NULLABILITY,
+  REQUIRED_COLUMNS_ENFORCED_AFTER_REPAIR,
   REQUIRED_LEGACY_JOB_COLUMNS,
   convertLegacyPostedDateText,
   isValidUuidString,
@@ -24,8 +26,13 @@ const fixturePath = path.resolve(
   __dirname,
   "../../../migrations/fixtures/neon_poc_legacy_jobs.sql",
 );
+const partialFixturePath = path.resolve(
+  __dirname,
+  "../../../migrations/fixtures/neon_poc_partial_no_updated_at.sql",
+);
 const migrationSql = readFileSync(migrationPath, "utf8");
 const fixtureSql = readFileSync(fixturePath, "utf8");
+const partialFixtureSql = readFileSync(partialFixturePath, "utf8");
 
 describe("002_neon_poc_compatibility.sql contract", () => {
   it("wraps the entire migration in an explicit BEGIN/COMMIT transaction", () => {
@@ -221,6 +228,81 @@ describe("live Neon PoC posted_date TEXT NOT NULL DEFAULT '' regression", () => 
     expect(plan.action).toBe("convert");
     expect(mayReplaceExistingNonNullIds()).toBe(false);
     expect(ids.every(isValidUuidString)).toBe(true);
+  });
+});
+
+describe("partial PoC missing updated_at → enforce required NOT NULL after repair", () => {
+  it("fixture omits updated_at before migration", () => {
+    const createTable = partialFixtureSql.slice(
+      partialFixtureSql.indexOf("CREATE TABLE jobs"),
+      partialFixtureSql.indexOf("INSERT INTO jobs"),
+    );
+    expect(createTable).not.toMatch(/\bupdated_at\b/i);
+    expect(partialFixtureSql).toContain("33333333-3333-4333-8333-333333333333");
+    expect(partialFixtureSql).toContain("'2026-08-12'");
+    expect(partialFixtureSql).toMatch(/posted_date TEXT NOT NULL DEFAULT ''/);
+  });
+
+  it("adds updated_at when absent, then fills NULLs before SET NOT NULL", () => {
+    expect(migrationSql).toMatch(
+      /ALTER TABLE jobs ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW\(\)/,
+    );
+
+    const fillSkills = migrationSql.indexOf(
+      "UPDATE jobs SET required_skills = '[]'::jsonb WHERE required_skills IS NULL",
+    );
+    const fillPreferred = migrationSql.indexOf(
+      "UPDATE jobs SET preferred_skills = '[]'::jsonb WHERE preferred_skills IS NULL",
+    );
+    const fillCreated = migrationSql.indexOf(
+      "UPDATE jobs SET created_at = NOW() WHERE created_at IS NULL",
+    );
+    const fillUpdated = migrationSql.indexOf(
+      "UPDATE jobs SET updated_at = COALESCE(created_at, NOW()) WHERE updated_at IS NULL",
+    );
+
+    expect(fillSkills).toBeGreaterThan(-1);
+    expect(fillPreferred).toBeGreaterThan(fillSkills);
+    expect(fillCreated).toBeGreaterThan(fillPreferred);
+    expect(fillUpdated).toBeGreaterThan(fillCreated);
+
+    for (const col of REQUIRED_COLUMNS_ENFORCED_AFTER_REPAIR) {
+      const setNotNull = migrationSql.indexOf(
+        `ALTER TABLE jobs ALTER COLUMN ${col} SET NOT NULL`,
+      );
+      expect(setNotNull).toBeGreaterThan(fillUpdated);
+    }
+  });
+
+  it("enforces required NOT NULL and keeps optional columns nullable", () => {
+    for (const col of POST_MIGRATION_NULLABILITY.requiredNotNull) {
+      expect(migrationSql).toContain(
+        `ALTER TABLE jobs ALTER COLUMN ${col} SET NOT NULL`,
+      );
+    }
+    for (const col of POST_MIGRATION_NULLABILITY.optionalNullable) {
+      expect(migrationSql).not.toMatch(
+        new RegExp(`ALTER TABLE jobs ALTER COLUMN ${col} SET NOT NULL`, "i"),
+      );
+    }
+    // Optional alignment still drops NOT NULL for these fields.
+    for (const col of OPTIONAL_LEGACY_JOB_COLUMNS) {
+      expect(migrationSql).toContain(`'${col}'`);
+    }
+  });
+
+  it("remains idempotent: SET NOT NULL and ADD COLUMN IF NOT EXISTS are re-runnable", () => {
+    expect(migrationSql).toMatch(/ADD COLUMN IF NOT EXISTS updated_at/);
+    expect(migrationSql).toMatch(/ADD COLUMN IF NOT EXISTS created_at/);
+    expect(migrationSql).toMatch(/ADD COLUMN IF NOT EXISTS required_skills/);
+    expect(migrationSql).toMatch(/ADD COLUMN IF NOT EXISTS preferred_skills/);
+    // Re-applying SET NOT NULL on already-NOT-NULL columns is a no-op in Postgres.
+    expect(
+      (migrationSql.match(/ALTER COLUMN required_skills SET NOT NULL/g) || []).length,
+    ).toBe(1);
+    expect(
+      (migrationSql.match(/ALTER COLUMN updated_at SET NOT NULL/g) || []).length,
+    ).toBe(1);
   });
 });
 

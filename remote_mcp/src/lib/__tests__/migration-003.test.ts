@@ -36,6 +36,13 @@ describe("003_job_lifecycle.sql contract", () => {
     );
   });
 
+  it("enforces one application per posting_id", () => {
+    expect(migrationSql).toContain("uq_applications_posting_id");
+    expect(migrationSql).toMatch(
+      /CREATE UNIQUE INDEX IF NOT EXISTS uq_applications_posting_id\s+ON applications \(posting_id\)/,
+    );
+  });
+
   it("does not require globally unique URLs", () => {
     expect(migrationSql).toMatch(/URL is intentionally NOT globally unique/i);
     expect(migrationSql).toContain("uq_job_postings_source_external_id");

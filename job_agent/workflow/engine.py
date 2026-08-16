@@ -19,6 +19,7 @@ from ..lifecycle import (
     CanonicalJobResolver,
     process_discovered_job,
 )
+from ..lifecycle.evaluation_service import EvaluationService
 from ..lifecycle.process import DiscoveryRunTracker
 from ..lifecycle.types import PostingDisposition
 
@@ -41,6 +42,7 @@ class JobSearchWorkflow:
         memory_store: MemoryStore,
         duplicate_detector: DuplicateDetector | None = None,
         lifecycle_resolver: CanonicalJobResolver | None = None,
+        evaluation_service: EvaluationService | None = None,
     ):
         self.profile = profile
         self.providers = providers
@@ -49,6 +51,11 @@ class JobSearchWorkflow:
         self.memory_store = memory_store
         self.duplicate_detector = duplicate_detector or DuplicateDetector(self.memory_store)
         self.lifecycle_resolver = lifecycle_resolver
+        self.evaluation_service = evaluation_service
+        if self.evaluation_service is None and lifecycle_resolver is not None:
+            store = getattr(lifecycle_resolver, "store", None)
+            if store is not None and hasattr(store, "save_job_evaluation"):
+                self.evaluation_service = EvaluationService(store)
 
     async def execute(self) -> list[JobMatch]:
         job_inputs = await self._search_all_sources()
@@ -200,6 +207,22 @@ class JobSearchWorkflow:
             memory_id = result.job_posting.get("id")
         elif result.canonical_job:
             memory_id = result.canonical_job.get("id")
+
+        if (
+            self.evaluation_service is not None
+            and result.job_posting
+            and result.job_posting.get("id")
+        ):
+            await self.evaluation_service.persist_evaluation(
+                posting_id=str(result.job_posting["id"]),
+                match_score=score,
+                recommendation=recommendation,
+                reason=reason,
+                metadata={
+                    "disposition": disposition.value,
+                    "canonical_similarity_score": result.classification.canonical_similarity_score,
+                },
+            )
 
         return JobMatch(
             job_input=job_input,

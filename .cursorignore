@@ -1,0 +1,16 @@
+﻿# Build / deps / env — keep out of Cursor indexing and agent change noise
+.next/
+**/.next/
+node_modules/
+**/node_modules/
+.venv/
+**/__pycache__/
+coverage/
+.turbo/
+out/
+build/
+*.tsbuildinfo
+.env
+.env.local
+remote_mcp/.env
+remote_mcp/.env.local

@@ -1,0 +1,40 @@
+import { NextResponse } from "next/server";
+
+import { withDashboardApi, zodBadRequest } from "@/lib/dashboard/api";
+import { jobPatchBodySchema, uuidSchema } from "@/lib/dashboard/validation";
+import { getDashboardJob, ignorePosting } from "@/lib/db/dashboard";
+
+export const dynamic = "force-dynamic";
+
+type Ctx = { params: Promise<{ id: string }> };
+
+export async function GET(_req: Request, ctx: Ctx) {
+  return withDashboardApi(async () => {
+    const { id } = await ctx.params;
+    const idParsed = uuidSchema.safeParse(id);
+    if (!idParsed.success) return zodBadRequest(idParsed.error);
+
+    const job = await getDashboardJob(idParsed.data);
+    if (!job) {
+      return NextResponse.json({ ok: false, found: false, id }, { status: 404 });
+    }
+    return NextResponse.json({ ok: true, found: true, job });
+  });
+}
+
+export async function PATCH(req: Request, ctx: Ctx) {
+  return withDashboardApi(async () => {
+    const { id } = await ctx.params;
+    const idParsed = uuidSchema.safeParse(id);
+    if (!idParsed.success) return zodBadRequest(idParsed.error);
+
+    const body = jobPatchBodySchema.safeParse(await req.json());
+    if (!body.success) return zodBadRequest(body.error);
+
+    const posting = await ignorePosting(idParsed.data);
+    if (!posting) {
+      return NextResponse.json({ ok: false, found: false }, { status: 404 });
+    }
+    return NextResponse.json({ ok: true, posting });
+  });
+}

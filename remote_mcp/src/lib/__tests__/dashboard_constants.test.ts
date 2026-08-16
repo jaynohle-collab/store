@@ -8,7 +8,7 @@ import {
 
 describe("dashboard query definitions", () => {
   it("keeps to-apply policy thresholds configurable", () => {
-    expect(DEFAULT_HIGH_MATCH_THRESHOLD).toBeGreaterThan(0);
+    expect(DEFAULT_HIGH_MATCH_THRESHOLD).toBe(70);
   });
 
   it("defines interviewing and applied status sets without scoring", () => {

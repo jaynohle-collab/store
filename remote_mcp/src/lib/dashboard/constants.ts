@@ -1,7 +1,7 @@
 /** Dashboard thresholds and status sets — not scoring logic. */
 
 export const DEFAULT_HIGH_MATCH_THRESHOLD = Number(
-  process.env.DASHBOARD_HIGH_MATCH_THRESHOLD ?? "15",
+  process.env.DASHBOARD_HIGH_MATCH_THRESHOLD ?? "70",
 );
 
 export const CLOSED_POSTING_STATUSES = [

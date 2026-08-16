@@ -13,16 +13,49 @@ class SimpleJobNormalizer(JobNormalizer):
     def normalize(self, job_input: "JobInput") -> "NormalizedJobPosting":
         from ..models.types import NormalizedJobPosting
 
+        metadata = job_input.metadata or {}
+        remote_status = _coerce_remote_status(metadata.get("remote_status"))
+        if remote_status == "Remote":
+            remote = True
+        elif remote_status in {"Hybrid", "Onsite"}:
+            remote = False
+        else:
+            remote = job_input.location is None or "remote" in (
+                job_input.location or ""
+            ).lower()
+
         return NormalizedJobPosting(
             title=job_input.title.strip(),
             company_name=job_input.company.strip(),
             location=job_input.location,
-            remote=(job_input.location is None or "remote" in (job_input.location or "").lower()),
+            remote=remote,
             description=job_input.description,
             url=job_input.url,
             source=job_input.source,
             description_hash=str(hash(job_input.description or job_input.url or job_input.title)),
+            remote_status=remote_status,
         )
+
+
+def _coerce_remote_status(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return "Remote" if value else "Onsite"
+    text = str(value).strip()
+    if not text:
+        return None
+    lowered = text.lower()
+    if lowered in {"remote", "true", "yes", "1"}:
+        return "Remote"
+    if lowered in {"hybrid"}:
+        return "Hybrid"
+    if lowered in {"onsite", "on-site", "on site", "false", "no", "0"}:
+        return "Onsite"
+    # Preserve already-normalized discovery values.
+    if text in {"Remote", "Hybrid", "Onsite"}:
+        return text
+    return text
 
 
 class MockToolClient:

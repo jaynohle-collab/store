@@ -16,6 +16,37 @@ export type ConversionPlan =
   | { action: "convert"; using: string }
   | { action: "abort"; reason: string };
 
+/** Optional legacy fields from 001_initial.sql — nullable, no empty-string default. */
+export const OPTIONAL_LEGACY_JOB_COLUMNS = [
+  "location",
+  "source",
+  "description",
+  "description_hash",
+  "remote_status",
+  "salary",
+  "posted_date",
+] as const;
+
+/** Required legacy fields that migration 002 must not relax. */
+export const REQUIRED_LEGACY_JOB_COLUMNS = [
+  "id",
+  "company",
+  "title",
+  "url",
+  "required_skills",
+  "preferred_skills",
+  "created_at",
+  "updated_at",
+] as const;
+
+/** Live Neon PoC shape that previously broke posted_date conversion. */
+export const LIVE_POC_POSTED_DATE_COLUMN = {
+  udtName: "text",
+  dataType: "text",
+  isNullable: "NO",
+  columnDefault: "''::text",
+} as const;
+
 export function isValidUuidString(value: string): boolean {
   return UUID_RE.test(value.trim());
 }
@@ -83,6 +114,42 @@ export function planTimestamptzConversion(column: ColumnTypeInfo): ConversionPla
     action: "abort",
     reason: `Cannot convert from unsupported type ${column.dataType} (${column.udtName}) to TIMESTAMPTZ. Existing data was NOT modified.`,
   };
+}
+
+/**
+ * Live PoC: TEXT posted_date with DEFAULT '' cannot cast to TIMESTAMPTZ until
+ * DEFAULT (and NOT NULL, for blank→NULL) are dropped first.
+ */
+export function planPostedDateTextConversionPrerequisites(column: {
+  udtName: string;
+  dataType: string;
+  isNullable?: string;
+  columnDefault?: string | null;
+}): { dropDefault: boolean; dropNotNull: boolean; using: string } {
+  const plan = planTimestamptzConversion(column);
+  if (plan.action !== "convert") {
+    throw new Error(`expected convert plan, got ${plan.action}`);
+  }
+  const hasTextDefault =
+    typeof column.columnDefault === "string" &&
+    /''|""|empty/i.test(column.columnDefault);
+  return {
+    dropDefault: true, // always drop before TYPE change for text→timestamptz safety
+    dropNotNull: column.isNullable === "NO" || hasTextDefault,
+    using: plan.using,
+  };
+}
+
+/** Blank legacy posted_date text becomes NULL after NULLIF conversion. */
+export function convertLegacyPostedDateText(value: string | null): Date | null {
+  if (value == null) return null;
+  const trimmed = value.trim();
+  if (trimmed === "") return null;
+  const parsed = new Date(trimmed);
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error(`unsafe posted_date value: ${value}`);
+  }
+  return parsed;
 }
 
 /** Migration 002 must be one atomic transaction so failed validation rolls everything back. */

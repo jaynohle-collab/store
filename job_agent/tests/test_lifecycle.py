@@ -677,6 +677,58 @@ class WorkflowBatchDedupeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(matches[1].decision.recommendation, "save_repost")
         self.assertFalse(matches[1].decision.duplicate)
 
+    async def test_lifecycle_preserves_remote_status_and_salary_metadata(self):
+        store = InMemoryLifecycleStore()
+        resolver = CanonicalJobResolver(store)
+
+        class PassthroughNormalizer(JobNormalizer):
+            def normalize(self, job_input: JobInput) -> NormalizedJobPosting:
+                return NormalizedJobPosting(
+                    title=job_input.title,
+                    company_name=job_input.company,
+                    location=job_input.location,
+                    remote=True,
+                    description=job_input.description,
+                    url=job_input.url,
+                    source=job_input.source,
+                    description_hash=compute_description_hash(job_input.description),
+                )
+
+        class Provider:
+            def search(self, profile):
+                return [
+                    JobInput(
+                        company="Example AI",
+                        title="Staff AI Engineer",
+                        url="https://example.com/jobs/staff-ai",
+                        description=JD_AI,
+                        source="company-careers",
+                        location="Remote, US",
+                        metadata={
+                            "remote_status": "Remote",
+                            "salary": "$220k-$280k",
+                        },
+                        external_job_id="staff-ai-1",
+                        posted_date=__import__("datetime").date(2026, 8, 16),
+                    )
+                ]
+
+        workflow = JobSearchWorkflow(
+            profile=JobSearchProfile(candidate_name="Jay", keywords=["ai"]),
+            providers=[Provider()],
+            normalizer=PassthroughNormalizer(),
+            scoring=SimpleScoreCalculator(),
+            memory_store=MemoryStore(tool_client=MagicMock()),
+            lifecycle_resolver=resolver,
+        )
+
+        matches = await workflow.execute()
+
+        self.assertEqual(len(matches), 1)
+        persisted = next(iter(store.job_postings.values()))
+        self.assertEqual(persisted["remote_status"], "Remote")
+        self.assertEqual(persisted["salary"], "$220k-$280k")
+
 
 class DiscoveryRunTests(unittest.IsolatedAsyncioTestCase):
     async def test_discovery_run_counts(self):

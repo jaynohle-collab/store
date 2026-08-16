@@ -165,6 +165,7 @@ class JobSearchWorkflow:
         score = self.scoring.score(posting, self.profile)
         posting.match_score = score
 
+        metadata = job_input.metadata or {}
         raw = {
             "company": job_input.company,
             "title": job_input.title,
@@ -173,12 +174,14 @@ class JobSearchWorkflow:
             "source": job_input.source,
             "location": job_input.location,
             "external_job_id": job_input.external_job_id,
+            "remote_status": metadata.get("remote_status"),
+            "salary": metadata.get("salary"),
             "posted_date": (
                 job_input.posted_date.isoformat()
                 if job_input.posted_date
-                else (job_input.metadata or {}).get("posted_date")
+                else metadata.get("posted_date")
             ),
-            "metadata": job_input.metadata or {},
+            "metadata": metadata,
         }
         result = await process_discovered_job(
             raw,

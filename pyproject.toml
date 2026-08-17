@@ -16,6 +16,7 @@ fastmcp = "*"
 mcp = ">=2.0,<3"
 sqlalchemy = "^2.0"
 pydantic = "^2.0"
+openai = ">=1.66.0"
 
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]

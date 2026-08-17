@@ -59,7 +59,8 @@ class MockToolClient:
 
 
 def load_gpt_jobs_from_file(path: Path) -> list[JobInput]:
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    # utf-8-sig accepts UTF-8 with or without a Windows BOM.
+    payload = json.loads(path.read_text(encoding="utf-8-sig"))
     loader = GPTJobLoader(payload)
     return loader.load_jobs()
 
@@ -75,7 +76,7 @@ def resolve_job_search_profile(
 
 
 def run_daily_job_run(
-    job_file: Path,
+    job_file: Path | None = None,
     memory_store: MemoryStore | None = None,
     *,
     persistence_mode: str | None = None,
@@ -83,6 +84,7 @@ def run_daily_job_run(
     profile: JobSearchProfile | None = None,
     profile_file: Path | None = None,
     scoring: ScoreCalculator | None = None,
+    jobs_payload: dict[str, Any] | None = None,
 ) -> dict[str, object]:
     """Run the daily GPT job workflow.
 
@@ -102,9 +104,17 @@ def run_daily_job_run(
         ``data/job_search_profile.json``.
     scoring:
         Optional scorer injection. Production uses ``ProfileScoreCalculator``.
+    jobs_payload:
+        Optional in-memory discovery payload ``{\"jobs\": [...]}``. When set,
+        ``job_file`` is not read (useful for automated discovery / tests).
     """
     try:
-        job_inputs = load_gpt_jobs_from_file(job_file)
+        if jobs_payload is not None:
+            job_inputs = GPTJobLoader(jobs_payload).load_jobs()
+        elif job_file is not None:
+            job_inputs = load_gpt_jobs_from_file(job_file)
+        else:
+            raise GPTJobIngestionError("Provide job_file or jobs_payload")
     except (json.JSONDecodeError, GPTJobIngestionError) as exc:
         logger.error("GPT job load failed: %s", exc)
         return {
@@ -127,9 +137,12 @@ def run_daily_job_run(
     evaluation_service = None
     if memory_store is None and mode == "remote":
         store = lifecycle_store if lifecycle_store is not None else RemoteLifecycleStore()
-        memory_store = MemoryStore(
-            tool_client=RemoteMcpMemoryAdapter(store.client)
-        )
+        client = getattr(store, "client", None)
+        if client is not None:
+            memory_store = MemoryStore(tool_client=RemoteMcpMemoryAdapter(client))
+        else:
+            # Injected in-memory lifecycle stores (tests) have no MCP client.
+            memory_store = MemoryStore(tool_client=MockToolClient())
         lifecycle_resolver = CanonicalJobResolver(store)
         resolved_profile = resolve_job_search_profile(profile, profile_file)
         evaluation_service = EvaluationService(

@@ -21,6 +21,10 @@ remote_mcp/.env
 remote_mcp/.env.local
 *.pem
 
+# Ephemeral discovery payloads (never commit)
+**/jay_job_discovery_*.json
+data/discovery_tmp/
+
 # OS / IDE
 .DS_Store
 Thumbs.db

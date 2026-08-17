@@ -83,6 +83,34 @@ class GPTJobLoaderTests(unittest.TestCase):
         with self.assertRaises(GPTJobIngestionError):
             GPTJobLoader([]).load_jobs()
 
+    def test_load_jobs_from_utf8_bom_file(self):
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from job_agent.examples.daily_job_run import load_gpt_jobs_from_file
+
+        payload = {
+            "jobs": [
+                {
+                    "company": "BOM Corp",
+                    "title": "Senior AI Engineer",
+                    "url": "https://example.com/bom",
+                    "description": "Build LLM systems.",
+                    "location": "Remote",
+                    "source": "gpt",
+                    "remote_status": "Remote",
+                    "salary": "",
+                    "posted_date": "2026-08-16",
+                }
+            ]
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bom.json"
+            path.write_bytes(b"\xef\xbb\xbf" + json.dumps(payload).encode("utf-8"))
+            jobs = load_gpt_jobs_from_file(path)
+            self.assertEqual(jobs[0].company, "BOM Corp")
+
 
 if __name__ == "__main__":
     unittest.main()

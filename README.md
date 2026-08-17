@@ -11,22 +11,26 @@ Personal job-search pipeline with a clear responsibility split:
 ### Production path (recommended)
 
 ```
-Job Sites
-    ↓
-ChatGPT job discovery
-    ↓
-Python job agent
+OpenAI job discovery (Responses API + web_search)
+      ↓
+raw discovery JSON  { "jobs": [ ... ] }
+      ↓
+Python Job Agent
     ├─ normalize
-    ├─ detect duplicates
-    ├─ score / filter
-    └─ decide whether to persist
-    ↓
+    ├─ SAME_POSTING / REPOST / NEW_JOB (lifecycle)
+    ├─ profile-v1 candidate scoring
+    └─ evaluation + persist decisions
+      ↓
 Auth0 Client Credentials (M2M)
-    ↓
+      ↓
 Remote Jay Job MCP (/api/mcp)
-    ↓
+      ↓
 Neon PostgreSQL
+      ↓
+Dashboard
 ```
+
+Discovery **only** finds current jobs and extracts raw fields. It must **not** score candidates, decide duplicates/reposts, or write to Neon/MCP. The Python agent remains the sole owner of normalization, lifecycle classification, scoring, evaluation persistence, and MCP persistence.
 
 ### ChatGPT direct MCP access
 
@@ -48,24 +52,29 @@ Production MCP URL:
 
 | Concern | Owner |
 |---|---|
+| Current job discovery (web search) | OpenAI discovery runner |
 | Normalization | Python job agent |
-| Duplicate detection | Python job agent |
-| Scoring / ranking / fit | Python job agent |
+| Duplicate / SAME_POSTING / REPOST / NEW_JOB | Python job agent |
+| Scoring / ranking / fit (`profile-v1`) | Python job agent |
 | Persist-or-not decision | Python job agent |
 | AuthN / AuthZ for storage API | Auth0 + remote MCP |
 | Job CRUD persistence | Remote MCP → Neon |
 | Application decisions | Python / human — **not** MCP |
 
-The remote MCP **must not** score jobs, rank jobs, decide candidate fit, perform duplicate decisions, or decide whether a discovered job should be saved.
+Discovery and the remote MCP **must not** score jobs, rank jobs, decide candidate fit, perform duplicate/repost decisions, or decide whether a discovered job should be saved.
 
 ## Repository structure
 
 ```
 job_agent/                 # Python orchestration, scoring, duplicates
+  discovery/               # OpenAI Responses API discovery (raw JSON only)
   integrations/            # Auth0 token provider + remote MCP client
   memory/                  # MemoryStore + duplicate detector
-  ranking/                 # Scoring
+  ranking/                 # Scoring (profile-v1)
   workflow/                # End-to-end pipeline
+  examples/
+    daily_job_run.py       # Ingest file → existing pipeline
+    automated_daily_run.py # Discover → existing pipeline
 job_memory/                # Local SQLite FastMCP (dev/legacy)
 remote_mcp/                # Vercel Next.js MCP (production persistence)
   migrations/              # Neon SQL migrations
@@ -73,6 +82,9 @@ remote_mcp/                # Vercel Next.js MCP (production persistence)
   src/app/api/health
   src/app/.well-known/oauth-protected-resource
 mcp_server.py              # Local FastMCP entrypoint
+.github/workflows/
+  ci.yml
+  daily-job-discovery.yml  # schedule + workflow_dispatch
 ```
 
 ## Persistence modes
@@ -141,9 +153,81 @@ AUTH0_TOKEN_URL=https://YOUR_TENANT.us.auth0.com/oauth/token
 AUTH0_CLIENT_ID=
 AUTH0_CLIENT_SECRET=
 AUTH0_AUDIENCE=https://jay-job-mcp-michaeltchueng-2909s-projects.vercel.app/api/mcp
+OPENAI_API_KEY=
+OPENAI_MODEL=gpt-4.1
+# DISCOVERY_MAX_JOBS=100
 ```
 
 Never commit real secrets. See `.env.example` and `remote_mcp/.env.example`.
+
+## Automated daily discovery
+
+Unattended discovery uses the official OpenAI Python SDK **Responses API** with the built-in `web_search` tool and strict JSON Schema structured outputs. The runner then hands raw `{ "jobs": [...] }` to the existing `run_daily_job_run` pipeline (`JOB_PERSISTENCE_MODE=remote`).
+
+Discovery does **not** score, dedupe, classify reposts, or write to Neon/MCP.
+
+### Local manual invocation
+
+```bash
+# activate venv, install deps
+pip install -r requirements.txt
+
+# set OPENAI_* + Auth0 + JOB_* env vars (see .env.example)
+python -m job_agent.examples.automated_daily_run
+```
+
+Or ingest an already-produced JSON file (UTF-8 with or without BOM):
+
+```bash
+python -m job_agent.examples.daily_job_run
+```
+
+### GitHub Actions
+
+Workflow: `.github/workflows/daily-job-discovery.yml`
+
+Supports:
+
+- **`workflow_dispatch`** — manual production testing from the Actions tab
+- **`schedule`** — daily cron `0 15 * * *` (≈ 8:00 AM Pacific during PDT; GitHub cron is UTC, so DST can shift the effective local hour to ~7:00 AM PST)
+
+#### Required GitHub secrets
+
+| Secret | Purpose |
+|---|---|
+| `OPENAI_API_KEY` | OpenAI API access |
+| `AUTH0_CLIENT_ID` | M2M client id |
+| `AUTH0_CLIENT_SECRET` | M2M client secret |
+
+#### Required / configured non-secret values
+
+| Name | Value |
+|---|---|
+| `OPENAI_MODEL` | GitHub Actions variable (default `gpt-4.1` in workflow) |
+| `JOB_PERSISTENCE_MODE` | `remote` |
+| `JOB_MCP_URL` | `https://jay-job-mcp.vercel.app/api/mcp` |
+| `AUTH0_TOKEN_URL` | `https://jay-job.us.auth0.com/oauth/token` |
+| `AUTH0_AUDIENCE` | existing API audience `https://jay-job-mcp-michaeltchueng-2909s-projects.vercel.app/api/mcp` |
+| `AUTH0_SCOPES` | `jobs:read jobs:write jobs:delete` |
+
+`AUTH0_AUDIENCE` intentionally preserves the currently configured Auth0 API audience and is **not** rewritten to the public stable MCP hostname.
+
+#### workflow_dispatch testing
+
+1. Open **Actions → Daily Job Discovery**
+2. Click **Run workflow**
+3. Inspect the job log for discovery counts and persistence summary
+4. Confirm dashboard / Neon received expected postings
+
+#### Disable the schedule
+
+- Disable the workflow in the GitHub Actions UI, or
+- Remove / comment the `schedule:` block in `daily-job-discovery.yml`, or
+- Temporarily rename/remove the workflow file on a branch (do not leave secrets in YAML)
+
+#### Inspect failures
+
+GitHub → **Actions** → select the failed **Daily Job Discovery** run → open the `discover-and-persist` job log. Secrets are never printed by the runner.
 
 ## Neon
 
@@ -204,6 +288,13 @@ python run_server.py
 ```bash
 # set JOB_PERSISTENCE_MODE=remote and Auth0 env vars
 python -m job_agent.examples.daily_job_run
+```
+
+### Automated discovery + remote persistence
+
+```bash
+# set OPENAI_API_KEY, OPENAI_MODEL, Auth0, and JOB_* env vars
+python -m job_agent.examples.automated_daily_run
 ```
 
 ## MCP tools

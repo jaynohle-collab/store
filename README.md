@@ -188,8 +188,27 @@ Workflow: `.github/workflows/daily-job-discovery.yml`
 
 Supports:
 
-- **`workflow_dispatch`** — manual production testing from the Actions tab
+- **`workflow_dispatch`** — manual production testing from the Actions tab (**always allowed**)
 - **`schedule`** — daily cron `0 15 * * *` (≈ 8:00 AM Pacific during PDT; GitHub cron is UTC, so DST can shift the effective local hour to ~7:00 AM PST)
+
+Scheduled runs are gated by repository variable **`JOB_DISCOVERY_SCHEDULE_ENABLED`**.
+If the variable is absent or not exactly `true`, schedule events skip the job safely.
+`workflow_dispatch` is never gated by that variable.
+
+#### Safe rollout
+
+1. Merge the discovery code
+2. Configure secrets / variables (`OPENAI_API_KEY`, Auth0 M2M, `OPENAI_MODEL`, …)
+3. Leave `JOB_DISCOVERY_SCHEDULE_ENABLED` **unset** or `false`
+4. Run **workflow_dispatch** manually
+5. Verify dashboard / Neon
+6. Set `JOB_DISCOVERY_SCHEDULE_ENABLED=true`
+7. Daily cron becomes active
+
+#### Pause the schedule
+
+Set `JOB_DISCOVERY_SCHEDULE_ENABLED=false` (or delete the variable).
+Manual `workflow_dispatch` continues to work.
 
 #### Required GitHub secrets
 
@@ -204,6 +223,8 @@ Supports:
 | Name | Value |
 |---|---|
 | `OPENAI_MODEL` | GitHub Actions variable (default `gpt-4.1` in workflow) |
+| `JOB_DISCOVERY_SCHEDULE_ENABLED` | repository variable; must be `true` for cron (leave unset/false until verified) |
+| `DISCOVERY_TIME_ZONE` | optional; default `America/Los_Angeles` |
 | `JOB_PERSISTENCE_MODE` | `remote` |
 | `JOB_MCP_URL` | `https://jay-job-mcp.vercel.app/api/mcp` |
 | `AUTH0_TOKEN_URL` | `https://jay-job.us.auth0.com/oauth/token` |
@@ -212,6 +233,8 @@ Supports:
 
 `AUTH0_AUDIENCE` intentionally preserves the currently configured Auth0 API audience and is **not** rewritten to the public stable MCP hostname.
 
+Discovery freshness uses the current calendar date in `DISCOVERY_TIME_ZONE` (default `America/Los_Angeles`) and injects it into the prompt at request time.
+
 #### workflow_dispatch testing
 
 1. Open **Actions → Daily Job Discovery**
@@ -219,11 +242,11 @@ Supports:
 3. Inspect the job log for discovery counts and persistence summary
 4. Confirm dashboard / Neon received expected postings
 
-#### Disable the schedule
+#### Disable / pause the schedule
 
+- Set `JOB_DISCOVERY_SCHEDULE_ENABLED=false`, or
 - Disable the workflow in the GitHub Actions UI, or
-- Remove / comment the `schedule:` block in `daily-job-discovery.yml`, or
-- Temporarily rename/remove the workflow file on a branch (do not leave secrets in YAML)
+- Remove / comment the `schedule:` block in `daily-job-discovery.yml`
 
 #### Inspect failures
 

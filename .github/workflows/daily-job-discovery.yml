@@ -18,11 +18,17 @@ concurrency:
 
 jobs:
   discover-and-persist:
+    # Manual workflow_dispatch always runs.
+    # Scheduled runs require repository variable JOB_DISCOVERY_SCHEDULE_ENABLED=true.
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      vars.JOB_DISCOVERY_SCHEDULE_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
       OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-4.1' }}
       DISCOVERY_MAX_JOBS: ${{ vars.DISCOVERY_MAX_JOBS || '100' }}
+      DISCOVERY_TIME_ZONE: ${{ vars.DISCOVERY_TIME_ZONE || 'America/Los_Angeles' }}
       JOB_PERSISTENCE_MODE: remote
       # Stable public MCP URL for transport.
       JOB_MCP_URL: https://jay-job-mcp.vercel.app/api/mcp

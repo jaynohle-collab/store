@@ -9,9 +9,14 @@ from .openai_discovery import (
     OpenAIDiscoveryConfig,
     validate_discovery_payload,
 )
-from .prompt import build_discovery_prompt
+from .prompt import (
+    DEFAULT_DISCOVERY_TIME_ZONE,
+    build_discovery_prompt,
+    resolve_discovery_calendar_date,
+)
 
 __all__ = [
+    "DEFAULT_DISCOVERY_TIME_ZONE",
     "DiscoveryConfigError",
     "DiscoveryError",
     "DiscoveryValidationError",
@@ -19,5 +24,6 @@ __all__ = [
     "OpenAIDiscoveryClient",
     "OpenAIDiscoveryConfig",
     "build_discovery_prompt",
+    "resolve_discovery_calendar_date",
     "validate_discovery_payload",
 ]

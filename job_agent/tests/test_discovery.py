@@ -120,12 +120,82 @@ class DiscoveryValidationTests(unittest.TestCase):
         with self.assertRaises(DiscoveryValidationError):
             validate_discovery_payload({"jobs": [job]}, max_jobs=100)
 
+    def test_invalid_remote_status_rejected(self):
+        job = dict(VALID_JOB, remote_status="remote")
+        with self.assertRaises(DiscoveryValidationError):
+            validate_discovery_payload({"jobs": [job]}, max_jobs=100)
+        job2 = dict(VALID_JOB, remote_status="Work from home")
+        with self.assertRaises(DiscoveryValidationError):
+            validate_discovery_payload({"jobs": [job2]}, max_jobs=100)
+
+    def test_invalid_nonempty_posted_date_rejected(self):
+        for bad in ("08/16/2026", "2026-8-16", "yesterday", "2026-13-01"):
+            job = dict(VALID_JOB, posted_date=bad)
+            with self.assertRaises(DiscoveryValidationError):
+                validate_discovery_payload({"jobs": [job]}, max_jobs=100)
+
+    def test_empty_posted_date_accepted(self):
+        job = dict(VALID_JOB, posted_date="")
+        payload = validate_discovery_payload({"jobs": [job]}, max_jobs=100)
+        self.assertEqual(payload["jobs"][0]["posted_date"], "")
+
     def test_prompt_states_discovery_only_boundaries(self):
-        prompt = build_discovery_prompt()
+        prompt = build_discovery_prompt(
+            discovery_date="2026-08-16",
+            time_zone="America/Los_Angeles",
+        )
         self.assertIn("MUST NOT", prompt)
         self.assertIn("score", prompt.lower())
         self.assertIn("duplicate", prompt.lower())
         self.assertIn("repost", prompt.lower())
+
+    def test_injected_discovery_date_and_timezone_appear_in_prompt(self):
+        prompt = build_discovery_prompt(
+            discovery_date="2026-08-16",
+            time_zone="America/Los_Angeles",
+        )
+        self.assertIn(
+            "Today's discovery date is 2026-08-16 in America/Los_Angeles.",
+            prompt,
+        )
+        self.assertIn("America/Los_Angeles", prompt)
+        self.assertIn("2026-08-16", prompt)
+        self.assertIn('posted_date exactly equals 2026-08-16', prompt)
+
+
+class ScheduleSafetyGateTests(unittest.TestCase):
+    """Assert the workflow YAML encodes the schedule safety gate."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        path = (
+            Path(__file__).resolve().parent.parent.parent
+            / ".github"
+            / "workflows"
+            / "daily-job-discovery.yml"
+        )
+        cls.workflow = path.read_text(encoding="utf-8")
+
+    def test_manual_dispatch_is_not_gated(self):
+        self.assertIn("workflow_dispatch", self.workflow)
+        self.assertIn("github.event_name == 'workflow_dispatch'", self.workflow)
+        # Manual path is OR'd ahead of the schedule variable check.
+        dispatch_idx = self.workflow.index("github.event_name == 'workflow_dispatch'")
+        enabled_idx = self.workflow.index(
+            "vars.JOB_DISCOVERY_SCHEDULE_ENABLED == 'true'"
+        )
+        self.assertLess(dispatch_idx, enabled_idx)
+
+    def test_scheduled_execution_requires_variable(self):
+        self.assertIn("JOB_DISCOVERY_SCHEDULE_ENABLED", self.workflow)
+        self.assertIn("vars.JOB_DISCOVERY_SCHEDULE_ENABLED == 'true'", self.workflow)
+        self.assertRegex(
+            self.workflow,
+            r"if:\s*>\s*\n\s*github\.event_name == 'workflow_dispatch' \|\|\s*\n"
+            r"\s*vars\.JOB_DISCOVERY_SCHEDULE_ENABLED == 'true'",
+        )
+        # Cron time unchanged.
+        self.assertIn('cron: "0 15 * * *"', self.workflow)
 
 
 class OpenAIDiscoveryClientTests(unittest.TestCase):
@@ -158,6 +228,8 @@ class OpenAIDiscoveryClientTests(unittest.TestCase):
             OpenAIDiscoveryConfig(api_key="sk-test", model="gpt-4.1", max_jobs=100),
             create_response=create,
             sleep=lambda _s: None,
+            discovery_date="2026-08-16",
+            time_zone="America/Los_Angeles",
         )
         payload = client.discover_jobs()
         self.assertEqual(len(payload["jobs"]), 1)
@@ -167,6 +239,8 @@ class OpenAIDiscoveryClientTests(unittest.TestCase):
         self.assertEqual(kwargs["tools"], [{"type": "web_search"}])
         self.assertEqual(kwargs["text"]["format"]["type"], "json_schema")
         self.assertTrue(kwargs["text"]["format"]["strict"])
+        self.assertIn("2026-08-16", kwargs["instructions"])
+        self.assertIn("America/Los_Angeles", kwargs["instructions"])
 
     def test_invalid_model_json_fails(self):
         create = MagicMock(return_value=SimpleNamespace(output_text="{not-json"))

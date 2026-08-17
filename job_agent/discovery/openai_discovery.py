@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import time
 from dataclasses import dataclass
+from datetime import date, datetime
 from typing import Any, Callable, Protocol
 
 from .prompt import DISCOVERY_JSON_SCHEMA, build_discovery_prompt
@@ -14,6 +16,9 @@ from .prompt import DISCOVERY_JSON_SCHEMA, build_discovery_prompt
 logger = logging.getLogger(__name__)
 
 CreateResponseFn = Callable[..., Any]
+
+ALLOWED_REMOTE_STATUSES = frozenset({"", "Remote", "Hybrid", "Onsite"})
+_POSTED_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 class DiscoveryError(RuntimeError):
@@ -149,6 +154,29 @@ def validate_discovery_payload(
                 raise DiscoveryValidationError(
                     f"Job at index {index} field '{field}' must be a list of strings"
                 )
+
+        remote_status = raw["remote_status"]
+        if remote_status not in ALLOWED_REMOTE_STATUSES:
+            raise DiscoveryValidationError(
+                f"Job at index {index} remote_status must be one of "
+                f"{sorted(ALLOWED_REMOTE_STATUSES)!r} (got {remote_status!r})"
+            )
+
+        posted_date = raw["posted_date"]
+        if posted_date != "":
+            if not _POSTED_DATE_RE.fullmatch(posted_date):
+                raise DiscoveryValidationError(
+                    f"Job at index {index} posted_date must be YYYY-MM-DD or \"\" "
+                    f"(got {posted_date!r})"
+                )
+            try:
+                date.fromisoformat(posted_date)
+            except ValueError as exc:
+                raise DiscoveryValidationError(
+                    f"Job at index {index} posted_date is not a valid calendar date: "
+                    f"{posted_date!r}"
+                ) from exc
+
         # Reject discovery payloads that try to smuggle scoring into raw JSON.
         for forbidden in ("match_score", "score", "recommendation", "candidate_score"):
             if forbidden in raw:
@@ -174,10 +202,16 @@ class OpenAIDiscoveryClient:
         *,
         create_response: CreateResponseFn | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        discovery_date: str | None = None,
+        time_zone: str | None = None,
+        now: datetime | None = None,
     ):
         self.config = config
         self._create_response = create_response
         self._sleep = sleep
+        self._discovery_date = discovery_date
+        self._time_zone = time_zone
+        self._now = now
 
     def discover_jobs(self) -> dict[str, Any]:
         raw_text = self._request_structured_json()
@@ -191,7 +225,11 @@ class OpenAIDiscoveryClient:
 
     def _request_structured_json(self) -> str:
         create = self._create_response or self._default_create_response
-        prompt = build_discovery_prompt()
+        prompt = build_discovery_prompt(
+            discovery_date=self._discovery_date,
+            time_zone=self._time_zone,
+            now=self._now,
+        )
         last_error: Exception | None = None
 
         attempts = self.config.max_retries + 1

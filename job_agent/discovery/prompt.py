@@ -2,14 +2,57 @@
 
 from __future__ import annotations
 
+import os
+from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 
-def build_discovery_prompt() -> str:
+DEFAULT_DISCOVERY_TIME_ZONE = "America/Los_Angeles"
+
+
+def resolve_discovery_calendar_date(
+    *,
+    time_zone: str | None = None,
+    now: datetime | None = None,
+    discovery_date: str | None = None,
+) -> tuple[str, str]:
+    """Return ``(YYYY-MM-DD, time_zone_name)`` for discovery freshness.
+
+    ``discovery_date`` and ``now`` are injectable so unit tests do not depend on
+    the system clock.
+    """
+    tz_name = (
+        (time_zone if time_zone is not None else os.environ.get("DISCOVERY_TIME_ZONE"))
+        or DEFAULT_DISCOVERY_TIME_ZONE
+    ).strip() or DEFAULT_DISCOVERY_TIME_ZONE
+
+    if discovery_date is not None:
+        date.fromisoformat(discovery_date)
+        return discovery_date, tz_name
+
+    instant = now if now is not None else datetime.now(timezone.utc)
+    if instant.tzinfo is None:
+        instant = instant.replace(tzinfo=timezone.utc)
+    local_day = instant.astimezone(ZoneInfo(tz_name)).date().isoformat()
+    return local_day, tz_name
+
+
+def build_discovery_prompt(
+    *,
+    discovery_date: str | None = None,
+    time_zone: str | None = None,
+    now: datetime | None = None,
+) -> str:
     """Return the instruction prompt for unattended daily job discovery.
 
     The model is a discovery layer only. It must not score, dedupe, classify
     reposts, or persist jobs — that remains the Python Job Agent's job.
     """
-    return """You are the Jay Job discovery layer only.
+    today, tz_name = resolve_discovery_calendar_date(
+        discovery_date=discovery_date,
+        time_zone=time_zone,
+        now=now,
+    )
+    return f"""You are the Jay Job discovery layer only.
 
 Your sole job is to find CURRENT public job postings and extract raw job fields.
 You MUST NOT:
@@ -18,6 +61,14 @@ You MUST NOT:
 - decide reposts / SAME_POSTING / NEW_JOB
 - persist jobs to any database, MCP, or storage system
 - invent match scores, recommendations, or candidate reasoning
+
+Today's discovery date is {today} in {tz_name}.
+
+Freshness rules (calendar days in {tz_name}):
+1) "posted today" means posted_date exactly equals {today}
+2) if results are insufficient, include jobs posted in the previous 3 calendar days only
+3) if still insufficient, expand to the previous 7 calendar days only
+Never knowingly include future, expired, closed, filled, or archived jobs.
 
 Search the public web for currently open roles matching:
 
@@ -56,13 +107,6 @@ Location preference:
 - United States
 - Remote / remote-first / remote-friendly preferred
 
-Freshness priority:
-1) jobs posted today
-2) jobs posted in the previous 3 days
-3) if results are insufficient, expand to the previous 7 days
-
-Never intentionally include expired, closed, filled, or archived postings.
-
 Preferred sources when available:
 - company career pages
 - Greenhouse, Lever, Ashby
@@ -76,7 +120,7 @@ Return ONLY structured JSON matching the required schema.
 For each job:
 - company, title, url, location, source, description are strings
 - required_skills and preferred_skills are string arrays (use [] when unknown)
-- remote_status is one of: "Remote", "Hybrid", "Onsite", or "" if unknown
+- remote_status is exactly one of: "Remote", "Hybrid", "Onsite", or "" if unknown
 - salary is a string, or "" when unavailable
 - posted_date is YYYY-MM-DD when an exact posting date can be established, otherwise ""
 

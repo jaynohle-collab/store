@@ -9,6 +9,7 @@ from .openai_discovery import (
     OpenAIDiscoveryConfig,
     validate_discovery_payload,
 )
+from .inbox import DiscoveryInboxStore, InMemoryDiscoveryInboxStore
 from .prompt import (
     DEFAULT_DISCOVERY_TIME_ZONE,
     build_discovery_prompt,
@@ -19,7 +20,9 @@ __all__ = [
     "DEFAULT_DISCOVERY_TIME_ZONE",
     "DiscoveryConfigError",
     "DiscoveryError",
+    "DiscoveryInboxStore",
     "DiscoveryValidationError",
+    "InMemoryDiscoveryInboxStore",
     "JobDiscoveryClient",
     "OpenAIDiscoveryClient",
     "OpenAIDiscoveryConfig",

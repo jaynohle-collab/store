@@ -44,6 +44,13 @@ export const TOOL_PERMISSIONS: Record<string, JobScope> = {
   save_job_evaluation: SCOPES.WRITE,
   get_latest_job_evaluation: SCOPES.READ,
   list_job_evaluations: SCOPES.READ,
+  // Raw ChatGPT discovery inbox (no scoring / lifecycle)
+  submit_discovery_batch: SCOPES.WRITE,
+  get_discovery_batch: SCOPES.READ,
+  list_pending_discovery_batches: SCOPES.READ,
+  claim_discovery_batch: SCOPES.WRITE,
+  complete_discovery_batch: SCOPES.WRITE,
+  fail_discovery_batch: SCOPES.WRITE,
 };
 
 export function getAuth0Issuer(): string | undefined {

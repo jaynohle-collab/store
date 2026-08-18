@@ -181,3 +181,36 @@ class RemoteLifecycleStore:
             {"posting_id": posting_id, "limit": limit},
         )
         return list((result or {}).get("evaluations") or [])
+
+    async def submit_discovery_batch(self, payload: dict[str, Any]) -> dict[str, Any]:
+        result = await self._call("submit_discovery_batch", payload)
+        return (result or {}).get("batch") or result
+
+    async def get_discovery_batch(self, batch_id: str) -> dict[str, Any] | None:
+        result = await self._call("get_discovery_batch", {"id": batch_id})
+        return (result or {}).get("batch")
+
+    async def list_pending_discovery_batches(self, limit: int = 20) -> list[dict[str, Any]]:
+        result = await self._call(
+            "list_pending_discovery_batches",
+            {"limit": min(limit, 100)},
+        )
+        return list((result or {}).get("batches") or [])
+
+    async def claim_discovery_batch(self, batch_id: str | None = None) -> dict[str, Any] | None:
+        args: dict[str, Any] = {}
+        if batch_id:
+            args["id"] = batch_id
+        result = await self._call("claim_discovery_batch", args)
+        return (result or {}).get("batch")
+
+    async def complete_discovery_batch(self, batch_id: str) -> dict[str, Any] | None:
+        result = await self._call("complete_discovery_batch", {"id": batch_id})
+        return (result or {}).get("batch")
+
+    async def fail_discovery_batch(self, batch_id: str, error: str) -> dict[str, Any] | None:
+        result = await self._call(
+            "fail_discovery_batch",
+            {"id": batch_id, "error": error},
+        )
+        return (result or {}).get("batch")

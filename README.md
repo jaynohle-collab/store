@@ -11,26 +11,44 @@ Personal job-search pipeline with a clear responsibility split:
 ### Production path (recommended)
 
 ```
-OpenAI job discovery (Responses API + web_search)
-      ↓
-raw discovery JSON  { "jobs": [ ... ] }
-      ↓
+ChatGPT
+   ↓
+web job discovery
+   ↓
+submit_discovery_batch (MCP)
+   ↓
+raw discovery inbox (Neon)
+   ↓
+python -m job_agent.examples.process_discovery_inbox
+   ↓
 Python Job Agent
     ├─ normalize
     ├─ SAME_POSTING / REPOST / NEW_JOB (lifecycle)
     ├─ profile-v1 candidate scoring
     └─ evaluation + persist decisions
-      ↓
-Auth0 Client Credentials (M2M)
-      ↓
-Remote Jay Job MCP (/api/mcp)
-      ↓
-Neon PostgreSQL
-      ↓
-Dashboard
+   ↓
+existing MCP persistence
+   ↓
+Neon / Dashboard
 ```
 
-Discovery **only** finds current jobs and extracts raw fields. It must **not** score candidates, decide duplicates/reposts, or write to Neon/MCP. The Python agent remains the sole owner of normalization, lifecycle classification, scoring, evaluation persistence, and MCP persistence.
+ChatGPT **only** finds current jobs, extracts raw fields, and submits them.
+It must **not** score candidates, decide duplicates/reposts, create canonical jobs, or create evaluations.
+The Python agent remains the sole owner of normalization, lifecycle classification, scoring, evaluation persistence, and final persist decisions.
+
+User prompt:
+
+> Find today's matching jobs and submit them.
+
+Then process the inbox:
+
+```bash
+python -m job_agent.examples.process_discovery_inbox
+```
+
+Optional flags: `--limit 10` (default 10), `--batch-id <uuid>`.
+
+Zero pending batches is a successful no-op.
 
 ### ChatGPT direct MCP access
 
@@ -52,7 +70,8 @@ Production MCP URL:
 
 | Concern | Owner |
 |---|---|
-| Current job discovery (web search) | OpenAI discovery runner |
+| Current job discovery (web search) | ChatGPT |
+| Raw inbox submit/claim/complete/fail | Remote MCP → Neon (`discovery_inbox_batches`) |
 | Normalization | Python job agent |
 | Duplicate / SAME_POSTING / REPOST / NEW_JOB | Python job agent |
 | Scoring / ranking / fit (`profile-v1`) | Python job agent |
@@ -61,30 +80,31 @@ Production MCP URL:
 | Job CRUD persistence | Remote MCP → Neon |
 | Application decisions | Python / human — **not** MCP |
 
-Discovery and the remote MCP **must not** score jobs, rank jobs, decide candidate fit, perform duplicate/repost decisions, or decide whether a discovered job should be saved.
+ChatGPT and the remote MCP **must not** score jobs, rank jobs, decide candidate fit, perform duplicate/repost decisions, or decide whether a discovered job should be saved.
 
 ## Repository structure
 
 ```
 job_agent/                 # Python orchestration, scoring, duplicates
-  discovery/               # OpenAI Responses API discovery (raw JSON only)
+  discovery/               # Raw discovery validation + inbox processor helpers
   integrations/            # Auth0 token provider + remote MCP client
   memory/                  # MemoryStore + duplicate detector
   ranking/                 # Scoring (profile-v1)
   workflow/                # End-to-end pipeline
   examples/
-    daily_job_run.py       # Ingest file → existing pipeline
-    automated_daily_run.py # Discover → existing pipeline
+    daily_job_run.py              # Ingest file/payload → existing pipeline
+    process_discovery_inbox.py    # Claim inbox batches → daily_job_run
+    automated_daily_run.py        # Legacy OpenAI API discovery (optional)
 job_memory/                # Local SQLite FastMCP (dev/legacy)
 remote_mcp/                # Vercel Next.js MCP (production persistence)
-  migrations/              # Neon SQL migrations
+  migrations/              # Neon SQL migrations (005_discovery_inbox.sql)
   src/app/api/mcp          # via /api/[transport]
   src/app/api/health
   src/app/.well-known/oauth-protected-resource
 mcp_server.py              # Local FastMCP entrypoint
 .github/workflows/
   ci.yml
-  daily-job-discovery.yml  # schedule + workflow_dispatch
+  daily-job-discovery.yml  # legacy OpenAI schedule (disabled unless enabled)
 ```
 
 ## Persistence modes
@@ -118,6 +138,12 @@ Already expected to exist (do not auto-create):
 | `list_recent_jobs` | `jobs:read` | read-only |
 | `save_job` | `jobs:write` | write (not destructive) |
 | `delete_job` | `jobs:delete` | destructive |
+| `submit_discovery_batch` | `jobs:write` | raw inbox submit |
+| `get_discovery_batch` | `jobs:read` | raw inbox get |
+| `list_pending_discovery_batches` | `jobs:read` | raw inbox list |
+| `claim_discovery_batch` | `jobs:write` | pending → processing |
+| `complete_discovery_batch` | `jobs:write` | processing → completed |
+| `fail_discovery_batch` | `jobs:write` | processing → failed |
 
 HTTP semantics:
 
@@ -160,9 +186,11 @@ OPENAI_MODEL=gpt-4.1
 
 Never commit real secrets. See `.env.example` and `remote_mcp/.env.example`.
 
-## Automated daily discovery
+## Automated daily discovery (legacy OpenAI API)
 
-Unattended discovery uses the official OpenAI Python SDK **Responses API** with the built-in `web_search` tool and strict JSON Schema structured outputs. The runner then hands raw `{ "jobs": [...] }` to the existing `run_daily_job_run` pipeline (`JOB_PERSISTENCE_MODE=remote`).
+The ChatGPT inbox path above is the recommended workflow. The OpenAI Responses API runner remains in the repo but is not required.
+
+Unattended OpenAI discovery uses the official OpenAI Python SDK **Responses API** with the built-in `web_search` tool and strict JSON Schema structured outputs. The runner then hands raw `{ "jobs": [...] }` to the existing `run_daily_job_run` pipeline (`JOB_PERSISTENCE_MODE=remote`).
 
 Discovery does **not** score, dedupe, classify reposts, or write to Neon/MCP.
 
@@ -258,6 +286,9 @@ Schema migrations:
 
 1. `remote_mcp/migrations/001_initial.sql` — canonical schema for new environments
 2. `remote_mcp/migrations/002_neon_poc_compatibility.sql` — safe additive migration for the already-deployed Neon PoC
+3. `remote_mcp/migrations/003_job_lifecycle.sql` — canonical jobs / postings / applications / `discovery_runs`
+4. `remote_mcp/migrations/004_job_evaluations.sql` — Python evaluation snapshots
+5. `remote_mcp/migrations/005_discovery_inbox.sql` — raw ChatGPT inbox (`discovery_inbox_batches`; does **not** replace `discovery_runs`)
 
    - Detects existing `jobs.id` type
    - If UUID: preserves values; backfills NULLs only
@@ -313,7 +344,18 @@ python run_server.py
 python -m job_agent.examples.daily_job_run
 ```
 
-### Automated discovery + remote persistence
+### Process ChatGPT discovery inbox
+
+```bash
+# set JOB_PERSISTENCE_MODE=remote and Auth0 env vars
+python -m job_agent.examples.process_discovery_inbox
+python -m job_agent.examples.process_discovery_inbox --limit 10
+python -m job_agent.examples.process_discovery_inbox --batch-id <uuid>
+```
+
+A failed Python workflow marks the batch `failed`, keeps the raw payload, and stores a concise error. Batches are never deleted by the processor.
+
+### Legacy OpenAI API discovery (optional)
 
 ```bash
 # set OPENAI_API_KEY, OPENAI_MODEL, Auth0, and JOB_* env vars
@@ -328,7 +370,16 @@ python -m job_agent.examples.automated_daily_run
 4. `list_recent_jobs` — `days`, `limit`, `offset`
 5. `delete_job` — `id`
 
+6. `submit_discovery_batch` — raw ChatGPT jobs (`jobs`, `source`, `metadata`)
+7. `get_discovery_batch` — `id`
+8. `list_pending_discovery_batches` — `limit`
+9. `claim_discovery_batch` — optional `id`; pending → processing
+10. `complete_discovery_batch` — `id`; processing → completed
+11. `fail_discovery_batch` — `id`, `error`; processing → failed (payload retained)
+
 `save_job` also accepts optional `description_hash` and validates `posted_date` as an ISO date or offset datetime.
+
+Inbox `remote_status` is `""` / `Remote` / `Hybrid` / `Onsite`. `posted_date` is `""` or `YYYY-MM-DD`. Max batch size is `DISCOVERY_MAX_JOBS` (default 100).
 
 Public health endpoint (no auth): `GET /api/health`
 

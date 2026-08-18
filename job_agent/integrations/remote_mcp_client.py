@@ -219,6 +219,12 @@ class RemoteMcpMemoryAdapter:
             "save_job_evaluation",
             "get_latest_job_evaluation",
             "list_job_evaluations",
+            "submit_discovery_batch",
+            "get_discovery_batch",
+            "list_pending_discovery_batches",
+            "claim_discovery_batch",
+            "complete_discovery_batch",
+            "fail_discovery_batch",
         }:
             return await self.client.call_tool(name, arguments)
 

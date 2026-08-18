@@ -148,6 +148,11 @@ def validate_discovery_payload(
                 raise DiscoveryValidationError(
                     f"Job at index {index} field '{field}' must be a string"
                 )
+        for field in ("company", "title", "url", "description"):
+            if not str(raw[field]).strip():
+                raise DiscoveryValidationError(
+                    f"Job at index {index} field '{field}' must be a non-empty string"
+                )
         for field in ("required_skills", "preferred_skills"):
             value = raw[field]
             if not isinstance(value, list) or any(not isinstance(item, str) for item in value):

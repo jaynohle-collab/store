@@ -80,7 +80,7 @@ type FilterParams = {
   toApply: boolean;
   appliedOnly: boolean;
   interviewingOnly: boolean;
-  threshold: number;
+  minMatch: number | null;
   closed: string[];
   interview: string[];
   appliedLater: string[];
@@ -108,7 +108,10 @@ function buildFilterParams(filters: JobListFilters): FilterParams {
     toApply: filters.toApply === true,
     appliedOnly: filters.applied === true,
     interviewingOnly: filters.interviewing === true,
-    threshold: filters.minMatch ?? DEFAULT_HIGH_MATCH_THRESHOLD,
+    minMatch:
+      filters.minMatch != null && Number.isFinite(filters.minMatch)
+        ? filters.minMatch
+        : null,
     closed: CLOSED_POSTING_STATUSES as unknown as string[],
     interview: INTERVIEW_STATUSES as unknown as string[],
     appliedLater: APPLIED_OR_LATER_STATUSES as unknown as string[],
@@ -194,10 +197,13 @@ export async function listDashboardJobs(filters: JobListFilters = {}): Promise<J
         AND (
           ${p.toApply}::boolean IS NOT TRUE OR (
             NOT (LOWER(COALESCE(p.posting_status, 'active')) = ANY(${p.closed}))
-            AND le.match_score IS NOT NULL AND le.match_score >= ${p.threshold}
+            AND le.recommendation IN ('save', 'save_repost')
             AND pa.application_id IS NULL
           )
         )
+        AND (${p.minMatch}::numeric IS NULL OR (
+          le.match_score IS NOT NULL AND le.match_score >= ${p.minMatch}
+        ))
         AND (${p.appliedOnly}::boolean IS NOT TRUE OR pa.application_status = ANY(${p.appliedLater}))
         AND (${p.interviewingOnly}::boolean IS NOT TRUE OR pa.application_status = ANY(${p.interview}))
       ORDER BY le.match_score DESC NULLS LAST, p.first_seen_at DESC, p.id DESC
@@ -267,10 +273,13 @@ export async function listDashboardJobs(filters: JobListFilters = {}): Promise<J
         AND (
           ${p.toApply}::boolean IS NOT TRUE OR (
             NOT (LOWER(COALESCE(p.posting_status, 'active')) = ANY(${p.closed}))
-            AND le.match_score IS NOT NULL AND le.match_score >= ${p.threshold}
+            AND le.recommendation IN ('save', 'save_repost')
             AND pa.application_id IS NULL
           )
         )
+        AND (${p.minMatch}::numeric IS NULL OR (
+          le.match_score IS NOT NULL AND le.match_score >= ${p.minMatch}
+        ))
         AND (${p.appliedOnly}::boolean IS NOT TRUE OR pa.application_status = ANY(${p.appliedLater}))
         AND (${p.interviewingOnly}::boolean IS NOT TRUE OR pa.application_status = ANY(${p.interview}))
       ORDER BY COALESCE(p.posted_date, p.first_seen_at) DESC NULLS LAST, p.id DESC
@@ -340,10 +349,13 @@ export async function listDashboardJobs(filters: JobListFilters = {}): Promise<J
         AND (
           ${p.toApply}::boolean IS NOT TRUE OR (
             NOT (LOWER(COALESCE(p.posting_status, 'active')) = ANY(${p.closed}))
-            AND le.match_score IS NOT NULL AND le.match_score >= ${p.threshold}
+            AND le.recommendation IN ('save', 'save_repost')
             AND pa.application_id IS NULL
           )
         )
+        AND (${p.minMatch}::numeric IS NULL OR (
+          le.match_score IS NOT NULL AND le.match_score >= ${p.minMatch}
+        ))
         AND (${p.appliedOnly}::boolean IS NOT TRUE OR pa.application_status = ANY(${p.appliedLater}))
         AND (${p.interviewingOnly}::boolean IS NOT TRUE OR pa.application_status = ANY(${p.interview}))
       ORDER BY c.company ASC, p.first_seen_at DESC, p.id DESC
@@ -413,10 +425,13 @@ export async function listDashboardJobs(filters: JobListFilters = {}): Promise<J
         AND (
           ${p.toApply}::boolean IS NOT TRUE OR (
             NOT (LOWER(COALESCE(p.posting_status, 'active')) = ANY(${p.closed}))
-            AND le.match_score IS NOT NULL AND le.match_score >= ${p.threshold}
+            AND le.recommendation IN ('save', 'save_repost')
             AND pa.application_id IS NULL
           )
         )
+        AND (${p.minMatch}::numeric IS NULL OR (
+          le.match_score IS NOT NULL AND le.match_score >= ${p.minMatch}
+        ))
         AND (${p.appliedOnly}::boolean IS NOT TRUE OR pa.application_status = ANY(${p.appliedLater}))
         AND (${p.interviewingOnly}::boolean IS NOT TRUE OR pa.application_status = ANY(${p.interview}))
       ORDER BY p.first_seen_at DESC, p.id DESC
@@ -510,7 +525,7 @@ export async function getDashboardSummary(
   const rows = await sql`
     WITH latest_eval AS (
       SELECT DISTINCT ON (posting_id)
-        posting_id, match_score
+        posting_id, match_score, recommendation
       FROM job_evaluations
       WHERE scoring_version = ${scoringVersion}
         AND profile_version = ${profileVersion}
@@ -540,8 +555,7 @@ export async function getDashboardSummary(
         LEFT JOIN latest_eval le ON le.posting_id = p.id
         LEFT JOIN posting_app pa ON pa.posting_id = p.id
         WHERE NOT (LOWER(COALESCE(p.posting_status, 'active')) = ANY(${closed}))
-          AND le.match_score IS NOT NULL
-          AND le.match_score >= ${highMatchThreshold}
+          AND le.recommendation IN ('save', 'save_repost')
           AND pa.posting_id IS NULL
       ) AS to_apply,
       (SELECT COUNT(*)::int FROM applications

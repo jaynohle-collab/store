@@ -19,8 +19,8 @@ export default async function ToApplyPage() {
         <div>
           <h1>To Apply</h1>
           <p>
-            Active postings with match score at/above threshold and no application for this
-            posting. Reposts are never auto-marked applied.
+            Active postings with a save or save_repost recommendation and no application for
+            this posting. Sorted by match score. Reposts are never auto-marked applied.
           </p>
         </div>
       </div>

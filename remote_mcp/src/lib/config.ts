@@ -32,6 +32,7 @@ export const TOOL_PERMISSIONS: Record<string, JobScope> = {
   list_reposts_with_prior_applications: SCOPES.READ,
   find_posting_by_url: SCOPES.READ,
   find_posting_by_external_id: SCOPES.READ,
+  check_discovery_candidates: SCOPES.READ,
   record_application: SCOPES.WRITE,
   get_application: SCOPES.READ,
   list_applications: SCOPES.READ,

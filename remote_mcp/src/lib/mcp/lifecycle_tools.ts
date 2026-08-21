@@ -34,6 +34,10 @@ import {
   updateJobPosting,
   updateJobPostingSchema,
 } from "../db/lifecycle";
+import {
+  checkDiscoveryCandidates,
+  checkDiscoveryCandidatesSchema,
+} from "../db/discovery_preflight";
 
 const PERSISTENCE_NOTE =
   " Persistence layer only — does not score, rank, classify SAME_POSTING/REPOST/NEW_JOB, or decide recommendations.";
@@ -57,6 +61,37 @@ function errorResult(message: string) {
 }
 
 export function registerLifecycleTools(server: McpServer): void {
+  server.registerTool(
+    "check_discovery_candidates",
+    {
+      title: "Check Discovery Candidates",
+      description:
+        "Read-only batch identity preflight for up to 100 lightweight job candidates. " +
+        "Returns deterministic posting/canonical signals before full description evaluation. " +
+        "Does not score, rank, save, claim, or mutate jobs." +
+        PERSISTENCE_NOTE,
+      inputSchema: checkDiscoveryCandidatesSchema,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (args, extra) => {
+      try {
+        assertToolPermission(getAuth(extra), "check_discovery_candidates");
+        const parsed = checkDiscoveryCandidatesSchema.parse(args);
+        const payload = await checkDiscoveryCandidates(parsed);
+        return jsonResult({ ok: true, ...payload });
+      } catch (error) {
+        return errorResult(
+          error instanceof Error ? error.message : "Failed to check discovery candidates",
+        );
+      }
+    },
+  );
+
   server.registerTool(
     "save_canonical_job",
     {

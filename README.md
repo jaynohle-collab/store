@@ -377,6 +377,8 @@ python -m job_agent.examples.automated_daily_run
 10. `complete_discovery_batch` — `id`; processing → completed
 11. `fail_discovery_batch` — `id`, `error`; processing → failed (payload retained)
 
+12. `check_discovery_candidates` — read-only batch identity preflight (1–100 lightweight candidates). Returns `KNOWN_UNCHANGED` / `UPDATED_POSTING` / `POSSIBLE_CROSS_SOURCE` / `UNSEEN` with matched posting/canonical ids and `previously_applied`. Latest `prior_evaluation` is included only for deterministic posting matches (`normalized_url` or `source_external_id`). Does not score, save, claim, or mutate.
+
 `save_job` also accepts optional `description_hash` and validates `posted_date` as an ISO date or offset datetime.
 
 Inbox `remote_status` is `""` / `Remote` / `Hybrid` / `Onsite`. `posted_date` is `""` or `YYYY-MM-DD`. Max batch size is `DISCOVERY_MAX_JOBS` (default 100).

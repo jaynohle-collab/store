@@ -7,7 +7,7 @@ import logging
 import os
 from typing import Any
 
-import httpx2
+import httpx
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 
@@ -56,11 +56,11 @@ class RemoteMcpClient:
     async def _call_tool_once(self, name: str, arguments: dict[str, Any]) -> Any:
         """Use the official MCP SDK for negotiation, framing, and transport."""
         token = self.token_provider.get_access_token()
-        async with httpx2.AsyncClient(
+        async with httpx.AsyncClient(
             headers={
                 "Authorization": f"Bearer {token}",
             },
-            timeout=httpx2.Timeout(30.0, read=300.0),
+            timeout=httpx.Timeout(30.0, read=300.0),
             follow_redirects=True,
         ) as http_client:
             transport = streamable_http_client(

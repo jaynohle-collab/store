@@ -14,7 +14,10 @@ import asyncio
 import json
 import logging
 import os
+from pathlib import Path
 from typing import Any, Callable
+
+from dotenv import load_dotenv
 
 from job_agent.discovery.inbox import DiscoveryInboxStore
 from job_agent.discovery.openai_discovery import validate_discovery_payload
@@ -25,6 +28,8 @@ from job_agent.integrations.persistence import get_persistence_mode
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
 _SECRET_ENV_KEYS = {
     "OPENAI_API_KEY",
     "AUTH0_CLIENT_SECRET",
@@ -32,6 +37,11 @@ _SECRET_ENV_KEYS = {
 }
 
 DEFAULT_LIMIT = 10
+
+
+def load_repo_dotenv() -> None:
+    """Load repository-root ``.env``; real process env vars always win."""
+    load_dotenv(_REPO_ROOT / ".env", override=False)
 
 
 def _redact_message(message: str) -> str:
@@ -70,6 +80,7 @@ def process_discovery_inbox(
     batch_id: str | None = None,
 ) -> dict[str, object]:
     """Claim and process pending inbox batches through the existing daily runner."""
+    load_repo_dotenv()
     store = inbox_store
     if store is None:
         if lifecycle_store is None:
@@ -160,6 +171,7 @@ def print_inbox_summary(summary: dict[str, object]) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    load_repo_dotenv()
     parser = argparse.ArgumentParser(
         description="Process pending ChatGPT discovery inbox batches through the Python job agent.",
     )

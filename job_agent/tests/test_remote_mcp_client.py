@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import importlib
+import inspect
 import unittest
 from unittest.mock import AsyncMock, MagicMock
 
+from job_agent.integrations.lifecycle_store import RemoteLifecycleStore
 from job_agent.integrations.remote_mcp_client import (
     RemoteMcpClient,
     RemoteMcpMemoryAdapter,
@@ -10,6 +13,14 @@ from job_agent.integrations.remote_mcp_client import (
 
 
 class RemoteMcpClientTests(unittest.IsolatedAsyncioTestCase):
+    def test_import_uses_httpx_not_httpx2(self) -> None:
+        module = importlib.import_module("job_agent.integrations.remote_mcp_client")
+        source = inspect.getsource(module)
+        self.assertIn("import httpx", source)
+        self.assertNotIn("httpx2", source)
+        self.assertTrue(hasattr(module, "httpx"))
+        self.assertFalse(hasattr(module, "httpx2"))
+
     async def test_retries_once_with_refreshed_token_after_401(self) -> None:
         token_provider = MagicMock()
         client = RemoteMcpClient(
@@ -95,6 +106,63 @@ class RemoteMcpClientTests(unittest.IsolatedAsyncioTestCase):
 
         arguments = remote.call_tool.await_args.args[1]
         self.assertEqual(arguments["description_hash"], "sha256-value")
+
+
+class RemoteLifecycleStoreSaveCanonicalJobTests(unittest.IsolatedAsyncioTestCase):
+    async def test_save_canonical_job_removes_none_values(self) -> None:
+        client = MagicMock()
+        client.call_tool = AsyncMock(
+            return_value={"canonical_job": {"id": "canonical-1"}}
+        )
+        store = RemoteLifecycleStore(client=client)
+
+        await store.save_canonical_job(
+            {
+                "company_key": "acme",
+                "normalized_title": "member of technical staff ai platform",
+                "title": "Member of Technical Staff, AI Platform",
+                "role_family": None,
+                "is_active": False,
+                "seen_count": 0,
+                "notes": "",
+                "tags": [],
+            }
+        )
+
+        arguments = client.call_tool.await_args.args[1]
+        self.assertNotIn("role_family", arguments)
+        self.assertEqual(arguments["is_active"], False)
+        self.assertEqual(arguments["seen_count"], 0)
+        self.assertEqual(arguments["notes"], "")
+        self.assertEqual(arguments["tags"], [])
+
+    async def test_member_of_technical_staff_ai_platform_drops_null_role_family(
+        self,
+    ) -> None:
+        client = MagicMock()
+        client.call_tool = AsyncMock(
+            return_value={"canonical_job": {"id": "canonical-mts"}}
+        )
+        store = RemoteLifecycleStore(client=client)
+
+        result = await store.save_canonical_job(
+            {
+                "company_name": "Acme",
+                "company_key": "acme",
+                "title": "Member of Technical Staff, AI Platform",
+                "normalized_title": "member of technical staff ai platform",
+                "role_family": None,
+            }
+        )
+
+        self.assertEqual(result["id"], "canonical-mts")
+        arguments = client.call_tool.await_args.args[1]
+        self.assertEqual(
+            arguments["title"],
+            "Member of Technical Staff, AI Platform",
+        )
+        self.assertNotIn("role_family", arguments)
+        self.assertNotIn(None, arguments.values())
 
 
 if __name__ == "__main__":

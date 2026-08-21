@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import unittest
 from contextlib import ExitStack
-from unittest.mock import patch
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 from job_agent.discovery.inbox import InMemoryDiscoveryInboxStore
 from job_agent.discovery.openai_discovery import DiscoveryValidationError
-from job_agent.examples.process_discovery_inbox import process_discovery_inbox
+from job_agent.examples import process_discovery_inbox as inbox_cli
+from job_agent.examples.process_discovery_inbox import (
+    load_repo_dotenv,
+    process_discovery_inbox,
+)
+from job_agent.integrations.auth0_token import Auth0Config
+from job_agent.integrations.remote_mcp_client import RemoteMcpClient
 from job_agent.lifecycle import CanonicalJobResolver
 from job_agent.lifecycle.memory_store import InMemoryLifecycleStore
 from job_agent.memory.client import MemoryStore
@@ -349,6 +357,76 @@ class DiscoveryInboxProcessorTests(unittest.TestCase):
                 memory_store=MemoryStore(tool_client=SimpleToolClient()),
             )
         self.assertEqual(summary["completed"], 1)
+
+
+class DiscoveryInboxDotenvLoadingTests(unittest.TestCase):
+    """Prove repo-root .env values are available before remote MCP config validation."""
+
+    _DOTENV_KEYS = (
+        "JOB_MCP_URL",
+        "AUTH0_TOKEN_URL",
+        "AUTH0_CLIENT_ID",
+        "AUTH0_CLIENT_SECRET",
+        "AUTH0_AUDIENCE",
+        "JOB_PERSISTENCE_MODE",
+    )
+
+    def setUp(self) -> None:
+        self._saved = {key: os.environ.get(key) for key in self._DOTENV_KEYS}
+        for key in self._DOTENV_KEYS:
+            os.environ.pop(key, None)
+
+    def tearDown(self) -> None:
+        for key, value in self._saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+    def test_temporary_dotenv_available_before_remote_mcp_config_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".env").write_text(
+                "\n".join(
+                    [
+                        "JOB_MCP_URL=https://dotenv-test.example/api/mcp",
+                        "AUTH0_TOKEN_URL=https://dotenv-test.example/oauth/token",
+                        "AUTH0_CLIENT_ID=dotenv-test-client-id",
+                        "AUTH0_CLIENT_SECRET=dotenv-test-client-secret",
+                        "AUTH0_AUDIENCE=https://dotenv-test.example/api/mcp",
+                        "JOB_PERSISTENCE_MODE=remote",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            with patch.object(inbox_cli, "_REPO_ROOT", root):
+                load_repo_dotenv()
+
+            # Values must be present before Auth0 / JOB_MCP_URL validation runs.
+            auth0 = Auth0Config.from_env()
+            self.assertEqual(auth0.token_url, "https://dotenv-test.example/oauth/token")
+            self.assertEqual(auth0.client_id, "dotenv-test-client-id")
+            self.assertEqual(auth0.audience, "https://dotenv-test.example/api/mcp")
+
+            client = RemoteMcpClient(token_provider=MagicMock())
+            self.assertEqual(client.mcp_url, "https://dotenv-test.example/api/mcp")
+            self.assertEqual(os.environ.get("JOB_PERSISTENCE_MODE"), "remote")
+
+    def test_process_env_overrides_dotenv(self) -> None:
+        os.environ["JOB_MCP_URL"] = "https://process-env.example/api/mcp"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / ".env").write_text(
+                "JOB_MCP_URL=https://dotenv-test.example/api/mcp\n",
+                encoding="utf-8",
+            )
+            with patch.object(inbox_cli, "_REPO_ROOT", root):
+                load_repo_dotenv()
+            self.assertEqual(
+                os.environ.get("JOB_MCP_URL"),
+                "https://process-env.example/api/mcp",
+            )
 
 
 if __name__ == "__main__":

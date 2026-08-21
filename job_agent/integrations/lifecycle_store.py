@@ -17,7 +17,9 @@ class RemoteLifecycleStore:
         return await self.client.call_tool(name, arguments or {})
 
     async def save_canonical_job(self, payload: dict[str, Any]) -> dict[str, Any]:
-        result = await self._call("save_canonical_job", payload)
+        # Drop None only — preserve False / 0 / "" / [] for Zod-compatible payloads.
+        cleaned = {key: value for key, value in payload.items() if value is not None}
+        result = await self._call("save_canonical_job", cleaned)
         return (result or {}).get("canonical_job") or result
 
     async def touch_canonical_job(

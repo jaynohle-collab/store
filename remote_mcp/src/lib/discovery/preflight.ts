@@ -18,6 +18,11 @@ import {
   normalizeLocationKey,
   normalizeTitleKey,
 } from "./normalize";
+import {
+  classifyPostingUrl,
+  type PostingUrlClass,
+  type PostingUrlClassification,
+} from "./posting_url";
 
 const FORBIDDEN_CANDIDATE_FIELDS = [
   "match_score",
@@ -125,6 +130,9 @@ export type DiscoveryPreflightResult = {
   gpt_reevaluation_required: boolean;
   gpt_skip_allowed: boolean;
   gpt_reuse_allowed: boolean;
+  posting_url_class: PostingUrlClass;
+  posting_url_obviously_invalid: boolean;
+  posting_url_classification_reason: string;
 };
 
 export type NormalizedPreflightCandidate = DiscoveryPreflightCandidate & {
@@ -268,6 +276,19 @@ function previouslyAppliedFor(
   return false;
 }
 
+function urlClassificationFields(url: string): {
+  posting_url_class: PostingUrlClass;
+  posting_url_obviously_invalid: boolean;
+  posting_url_classification_reason: string;
+} {
+  const classification: PostingUrlClassification = classifyPostingUrl(url);
+  return {
+    posting_url_class: classification.url_class,
+    posting_url_obviously_invalid: classification.is_obviously_invalid,
+    posting_url_classification_reason: classification.reason,
+  };
+}
+
 function resultFromPosting(
   candidate: NormalizedPreflightCandidate,
   posting: PreflightPostingRow,
@@ -317,6 +338,7 @@ function resultFromPosting(
     gpt_reevaluation_required: gptFields.gpt_reevaluation_required,
     gpt_skip_allowed: gptFields.gpt_skip_allowed,
     gpt_reuse_allowed: gptFields.gpt_reuse_allowed,
+    ...urlClassificationFields(candidate.url),
   };
 }
 
@@ -462,6 +484,7 @@ export function resolveDiscoveryPreflightResults(
         gpt_reevaluation_required: true,
         gpt_skip_allowed: false,
         gpt_reuse_allowed: false,
+        ...urlClassificationFields(candidate.url),
       };
     }
 
@@ -480,6 +503,7 @@ export function resolveDiscoveryPreflightResults(
       gpt_reevaluation_required: true,
       gpt_skip_allowed: false,
       gpt_reuse_allowed: false,
+      ...urlClassificationFields(candidate.url),
     };
   });
 }

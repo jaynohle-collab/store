@@ -5,6 +5,7 @@
 
 import { getSql } from "./client";
 import { loadLatestGptEvaluationsForPreflight } from "./discovery_gpt_evaluations";
+import { discoveryPreflightVersionConfig } from "../discovery/gpt_evaluation";
 import {
   checkDiscoveryCandidatesSchema,
   companyHashKey,
@@ -309,6 +310,7 @@ export async function loadDiscoveryPreflightIndex(
           .filter((value): value is string => Boolean(value)),
       ),
     ],
+    evaluationVersion: input.evaluation_version,
   });
   index.gptByNormalizedUrl = gptLookup.byNormalizedUrl;
   index.gptBySourceExternal = gptLookup.bySourceExternal;
@@ -319,13 +321,18 @@ export async function loadDiscoveryPreflightIndex(
 /** Read-only discovery identity preflight for up to 100 candidates. */
 export async function checkDiscoveryCandidates(
   input: CheckDiscoveryCandidatesInput,
-): Promise<{ results: DiscoveryPreflightResult[] }> {
+): Promise<
+  {
+    results: DiscoveryPreflightResult[];
+  } & ReturnType<typeof discoveryPreflightVersionConfig>
+> {
   const parsed = checkDiscoveryCandidatesSchema.parse(input);
   const index = await loadDiscoveryPreflightIndex(parsed);
   return {
     results: resolveDiscoveryPreflightResults(parsed.candidates, index, {
       evaluation_version: parsed.evaluation_version,
     }),
+    ...discoveryPreflightVersionConfig(parsed.evaluation_version),
   };
 }
 

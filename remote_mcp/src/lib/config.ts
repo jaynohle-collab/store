@@ -33,6 +33,7 @@ export const TOOL_PERMISSIONS: Record<string, JobScope> = {
   find_posting_by_url: SCOPES.READ,
   find_posting_by_external_id: SCOPES.READ,
   check_discovery_candidates: SCOPES.READ,
+  compute_discovery_description_hashes: SCOPES.READ,
   record_discovery_evaluations: SCOPES.WRITE,
   record_application: SCOPES.WRITE,
   get_application: SCOPES.READ,

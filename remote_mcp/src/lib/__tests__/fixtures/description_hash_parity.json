@@ -1,0 +1,80 @@
+[
+  {
+    "name": "empty-ish",
+    "description": "   ",
+    "normalized": "",
+    "description_hash": null
+  },
+  {
+    "name": "simple",
+    "description": "Build production LLM agents.",
+    "normalized": "build production llm agents",
+    "description_hash": "3406d8a6ef8edfbe"
+  },
+  {
+    "name": "uppercase",
+    "description": "Build Production LLM Agents.",
+    "normalized": "build production llm agents",
+    "description_hash": "3406d8a6ef8edfbe"
+  },
+  {
+    "name": "ampersand",
+    "description": "AI & ML Platform Engineer",
+    "normalized": "ai and ml platform engineer",
+    "description_hash": "250478873ae311da"
+  },
+  {
+    "name": "punct",
+    "description": "Staff Engineer — Agent Platform!!!",
+    "normalized": "staff engineer agent platform",
+    "description_hash": "8ed3008c7e593265"
+  },
+  {
+    "name": "tabs-newlines",
+    "description": "Line one.\t\nLine two.",
+    "normalized": "line one line two",
+    "description_hash": "e490ed577595f616"
+  },
+  {
+    "name": "repeated-whitespace",
+    "description": "hello    world",
+    "normalized": "hello world",
+    "description_hash": "b94d27b9934d3e08"
+  },
+  {
+    "name": "unicode",
+    "description": "Café résumé for ML",
+    "normalized": "café résumé for ml",
+    "description_hash": "2efee335977f0a9b"
+  },
+  {
+    "name": "punct-only",
+    "description": "!!! ---",
+    "normalized": "",
+    "description_hash": null
+  },
+  {
+    "name": "html-like",
+    "description": "<p>Build production LLM agents.</p>",
+    "normalized": "p build production llm agents p",
+    "description_hash": "a2141bf352ed9ceb"
+  },
+  {
+    "name": "windows-nl",
+    "description": "Line one.\r\nLine two.",
+    "normalized": "line one line two",
+    "description_hash": "e490ed577595f616"
+  },
+  {
+    "name": "unix-nl",
+    "description": "Line one.\nLine two.",
+    "normalized": "line one line two",
+    "description_hash": "e490ed577595f616"
+  },
+  {
+    "name": "multiline",
+    "description": "Line one.\n\nLine two & three.",
+    "normalized": "line one line two and three",
+    "description_hash": "a0f205ceb9430c9b"
+  }
+]

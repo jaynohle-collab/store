@@ -57,7 +57,8 @@ const COMPANY_SUFFIXES = [
 export function normalizeFingerprintText(value: string | null | undefined): string {
   if (!value) return "";
   let normalized = value.toLowerCase().replace(/&/g, " and ");
-  normalized = normalized.replace(/[^\w\s]+/g, " ");
+  // Unicode-aware, matching Python 3 `\w` (letters, marks, numbers, underscore).
+  normalized = normalized.replace(/[^\p{L}\p{M}\p{N}_\s]+/gu, " ");
   normalized = normalized.replace(/\s+/g, " ").trim();
   return normalized;
 }

@@ -17,6 +17,10 @@ const PERSISTENCE_NOTE =
   "Does not score jobs itself, detect duplicates, classify reposts, or create canonical jobs. " +
   "Optional gpt_evaluation must reference a stored QUALIFIED evaluation (score >= 70). " +
   "When DISCOVERY_REQUIRE_GPT_EVALUATION=true, every job must include a matching stored evaluation. " +
+  "Never disable that flag during gpt-fit-v2 rollout. " +
+  "Optional quality gates (default off until cutover): DISCOVERY_REQUIRED_EVALUATION_VERSION, " +
+  "DISCOVERY_REQUIRE_REMOTE_US, DISCOVERY_REQUIRE_DIRECT_POSTING_URL, DISCOVERY_REQUIRE_DESCRIPTION_HASH. " +
+  "Any quality flag implicitly requires stored GPT evidence. " +
   "GPT admission scoring is separate from Python profile-v1 ranking.";
 
 function getAuth(context: { http?: { authInfo?: AuthInfo } }): AuthInfo | undefined {

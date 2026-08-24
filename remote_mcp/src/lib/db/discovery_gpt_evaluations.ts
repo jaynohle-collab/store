@@ -105,6 +105,26 @@ function mapGptPreflightRow(row: Record<string, unknown>): PreflightGptEvaluatio
       row.reasoning_summary == null ? null : String(row.reasoning_summary),
     evaluation_version: String(row.evaluation_version),
     description_hash: row.description_hash == null ? null : String(row.description_hash),
+    remote_scope:
+      row.remote_scope == null
+        ? null
+        : (String(row.remote_scope) as PreflightGptEvaluationRow["remote_scope"]),
+    direct_posting_url_verified:
+      row.direct_posting_url_verified == null
+        ? null
+        : Boolean(row.direct_posting_url_verified),
+    normalization_version:
+      row.normalization_version == null ? null : String(row.normalization_version),
+    posting_status:
+      row.posting_status == null
+        ? null
+        : (String(row.posting_status) as PreflightGptEvaluationRow["posting_status"]),
+    posting_status_verified_at:
+      row.posting_status_verified_at == null
+        ? null
+        : row.posting_status_verified_at instanceof Date
+          ? row.posting_status_verified_at.toISOString()
+          : String(row.posting_status_verified_at),
     evaluated_at: evaluatedAt,
     created_at: createdAt,
     normalized_url: row.normalized_url == null ? null : String(row.normalized_url),
@@ -130,6 +150,22 @@ function fingerprintFromStoredRow(row: Record<string, unknown>): string {
       row.hard_rejection_reason == null ? null : String(row.hard_rejection_reason),
     reasoning_summary: String(row.reasoning_summary),
     evaluation_version: String(row.evaluation_version),
+    remote_scope:
+      row.remote_scope == null
+        ? null
+        : (String(row.remote_scope) as DiscoveryGptEvaluationInput["remote_scope"]),
+    direct_posting_url_verified:
+      row.direct_posting_url_verified == null
+        ? null
+        : Boolean(row.direct_posting_url_verified),
+    normalization_version:
+      row.normalization_version == null ? null : String(row.normalization_version),
+    posting_status:
+      row.posting_status == null
+        ? null
+        : (String(row.posting_status) as DiscoveryGptEvaluationInput["posting_status"]),
+    posting_status_verified_at:
+      row.posting_status_verified_at == null ? null : String(row.posting_status_verified_at),
     normalized_url: row.normalized_url == null ? null : String(row.normalized_url),
   };
   return gptEvaluationIdempotencyFingerprint(normalized);
@@ -153,6 +189,11 @@ function toPublicRecord(row: DiscoveryGptEvaluationRecord): DiscoveryGptEvaluati
     hard_rejection_reason: row.hard_rejection_reason ?? null,
     reasoning_summary: row.reasoning_summary,
     evaluation_version: row.evaluation_version,
+    remote_scope: row.remote_scope ?? null,
+    direct_posting_url_verified: row.direct_posting_url_verified ?? null,
+    normalization_version: row.normalization_version ?? null,
+    posting_status: row.posting_status ?? null,
+    posting_status_verified_at: row.posting_status_verified_at ?? null,
     evaluated_at: row.evaluated_at ?? null,
     created_at: row.created_at,
   };
@@ -179,6 +220,11 @@ function toMemoryRow(
     hard_rejection_reason: normalized.hard_rejection_reason ?? null,
     reasoning_summary: normalized.reasoning_summary,
     evaluation_version: normalized.evaluation_version,
+    remote_scope: normalized.remote_scope ?? null,
+    direct_posting_url_verified: normalized.direct_posting_url_verified ?? null,
+    normalization_version: normalized.normalization_version ?? null,
+    posting_status: normalized.posting_status ?? null,
+    posting_status_verified_at: normalized.posting_status_verified_at ?? null,
     evaluated_at: normalized.evaluated_at ?? null,
     created_at: createdAt,
   };
@@ -274,6 +320,11 @@ async function recordOneSql(
         hard_rejection_reason,
         reasoning_summary,
         evaluation_version,
+        remote_scope,
+        direct_posting_url_verified,
+        normalization_version,
+        posting_status,
+        posting_status_verified_at,
         evaluated_at
       ) VALUES (
         ${record.client_evaluation_id}::uuid,
@@ -291,6 +342,11 @@ async function recordOneSql(
         ${record.hard_rejection_reason ?? null},
         ${record.reasoning_summary},
         ${record.evaluation_version},
+        ${record.remote_scope ?? null},
+        ${record.direct_posting_url_verified ?? null},
+        ${record.normalization_version ?? null},
+        ${record.posting_status ?? null},
+        ${record.posting_status_verified_at ? new Date(record.posting_status_verified_at) : null},
         ${evaluatedAt}
       )
       RETURNING *
@@ -392,14 +448,24 @@ export async function loadLatestGptEvaluationsForPreflight(params: {
   sourceExternalKeys: string[];
   sources: string[];
   externalJobIds: string[];
+  evaluationVersion?: string;
 }): Promise<{
   byNormalizedUrl: Map<string, PreflightGptEvaluationRow>;
   bySourceExternal: Map<string, PreflightGptEvaluationRow>;
 }> {
-  const { normalizedUrls, sourceExternalKeys, sources, externalJobIds } = params;
+  const {
+    normalizedUrls,
+    sourceExternalKeys,
+    sources,
+    externalJobIds,
+    evaluationVersion,
+  } = params;
+  const versionFilter = evaluationVersion?.trim() || null;
 
   if (useMemoryBackend) {
-    const rows = memoryEvaluations.map((row) => mapGptPreflightRow(row));
+    const rows = memoryEvaluations
+      .map((row) => mapGptPreflightRow(row))
+      .filter((row) => (versionFilter ? row.evaluation_version === versionFilter : true));
     const urlWanted = new Set(normalizedUrls);
     const pairWanted = new Set(sourceExternalKeys);
     const filtered = rows.filter((row) => {
@@ -419,15 +485,30 @@ export async function loadLatestGptEvaluationsForPreflight(params: {
 
   if (normalizedUrls.length) {
     const sql = getSql();
-    const rows = await sql`
-      SELECT DISTINCT ON (normalized_url)
-        id, normalized_url, source, external_job_id, gpt_relevance_score, gpt_decision,
-        hard_rejection_reason, reasoning_summary, evaluation_version, description_hash,
-        evaluated_at, created_at
-      FROM discovery_gpt_evaluations
-      WHERE normalized_url = ANY(${normalizedUrls})
-      ORDER BY normalized_url, created_at DESC, id DESC
-    `;
+    const rows = versionFilter
+      ? await sql`
+          SELECT DISTINCT ON (normalized_url)
+            id, normalized_url, source, external_job_id, gpt_relevance_score, gpt_decision,
+            hard_rejection_reason, reasoning_summary, evaluation_version, description_hash,
+            remote_scope, direct_posting_url_verified, normalization_version,
+            posting_status, posting_status_verified_at,
+            evaluated_at, created_at
+          FROM discovery_gpt_evaluations
+          WHERE normalized_url = ANY(${normalizedUrls})
+            AND evaluation_version = ${versionFilter}
+          ORDER BY normalized_url, created_at DESC, id DESC
+        `
+      : await sql`
+          SELECT DISTINCT ON (normalized_url)
+            id, normalized_url, source, external_job_id, gpt_relevance_score, gpt_decision,
+            hard_rejection_reason, reasoning_summary, evaluation_version, description_hash,
+            remote_scope, direct_posting_url_verified, normalization_version,
+            posting_status, posting_status_verified_at,
+            evaluated_at, created_at
+          FROM discovery_gpt_evaluations
+          WHERE normalized_url = ANY(${normalizedUrls})
+          ORDER BY normalized_url, created_at DESC, id DESC
+        `;
     for (const raw of rows) {
       const row = mapGptPreflightRow(raw as Record<string, unknown>);
       if (row.normalized_url) byNormalizedUrl.set(row.normalized_url, row);
@@ -436,16 +517,32 @@ export async function loadLatestGptEvaluationsForPreflight(params: {
 
   if (sources.length && externalJobIds.length) {
     const sql = getSql();
-    const rows = await sql`
-      SELECT DISTINCT ON (source, external_job_id)
-        id, normalized_url, source, external_job_id, gpt_relevance_score, gpt_decision,
-        hard_rejection_reason, reasoning_summary, evaluation_version, description_hash,
-        evaluated_at, created_at
-      FROM discovery_gpt_evaluations
-      WHERE source = ANY(${sources})
-        AND external_job_id = ANY(${externalJobIds})
-      ORDER BY source, external_job_id, created_at DESC, id DESC
-    `;
+    const rows = versionFilter
+      ? await sql`
+          SELECT DISTINCT ON (source, external_job_id)
+            id, normalized_url, source, external_job_id, gpt_relevance_score, gpt_decision,
+            hard_rejection_reason, reasoning_summary, evaluation_version, description_hash,
+            remote_scope, direct_posting_url_verified, normalization_version,
+            posting_status, posting_status_verified_at,
+            evaluated_at, created_at
+          FROM discovery_gpt_evaluations
+          WHERE source = ANY(${sources})
+            AND external_job_id = ANY(${externalJobIds})
+            AND evaluation_version = ${versionFilter}
+          ORDER BY source, external_job_id, created_at DESC, id DESC
+        `
+      : await sql`
+          SELECT DISTINCT ON (source, external_job_id)
+            id, normalized_url, source, external_job_id, gpt_relevance_score, gpt_decision,
+            hard_rejection_reason, reasoning_summary, evaluation_version, description_hash,
+            remote_scope, direct_posting_url_verified, normalization_version,
+            posting_status, posting_status_verified_at,
+            evaluated_at, created_at
+          FROM discovery_gpt_evaluations
+          WHERE source = ANY(${sources})
+            AND external_job_id = ANY(${externalJobIds})
+          ORDER BY source, external_job_id, created_at DESC, id DESC
+        `;
     const wanted = new Set(sourceExternalKeys);
     for (const raw of rows) {
       const row = mapGptPreflightRow(raw as Record<string, unknown>);

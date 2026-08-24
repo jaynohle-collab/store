@@ -5,10 +5,17 @@ import { getDiscoveryGptEvaluationById } from "./discovery_gpt_evaluations";
 import {
   DEFAULT_GPT_EVALUATION_VERSION,
   GPT_QUALIFIED_THRESHOLD,
+  discoveryQualityGatesRequireStoredEvidence,
+  getRequiredDiscoveryEvaluationVersion,
   gptAdmissionAttachmentSchema,
-  isDiscoveryGptEvaluationRequired,
+  isDiscoveryRequireDescriptionHash,
+  isDiscoveryRequireDirectPostingUrl,
+  isDiscoveryRequireRemoteUs,
+  isGptFitV2,
 } from "../discovery/gpt_evaluation";
+import { isCanonicalDescriptionHash } from "../discovery/description_hash";
 import { normalizeJobUrl } from "../discovery/normalize";
+import { isDeterministicallyInvalidPostingUrl } from "../discovery/posting_url";
 
 function mapRow<T extends Record<string, unknown>>(row: Record<string, unknown>): T {
   const out: Record<string, unknown> = {};
@@ -41,6 +48,11 @@ const FORBIDDEN_DISCOVERY_FIELDS = [
   "reasoning_summary",
   "evaluation_version",
   "evaluation_id",
+  "remote_scope",
+  "direct_posting_url_verified",
+  "normalization_version",
+  "posting_status",
+  "posting_status_verified_at",
 ] as const;
 
 const postedDateSchema = z.string().refine((value) => {
@@ -132,7 +144,6 @@ function storedMatchesJobIdentity(
   const jobUrl = normalizeJobUrl(job.url);
   const storedUrl =
     stored.normalized_url == null ? null : String(stored.normalized_url);
-  // Inbox jobs expose URL as the deterministic identity key.
   return Boolean(jobUrl && storedUrl && jobUrl === storedUrl);
 }
 
@@ -140,16 +151,20 @@ function storedMatchesJobIdentity(
 export async function assertDiscoveryJobsGptAdmissionGate(
   jobs: z.infer<typeof discoveryJobSchema>[],
 ): Promise<void> {
-  const required = isDiscoveryGptEvaluationRequired();
+  const requireEvidence = discoveryQualityGatesRequireStoredEvidence();
+  const requiredVersion = getRequiredDiscoveryEvaluationVersion();
+  const requireRemoteUs = isDiscoveryRequireRemoteUs();
+  const requireDirectUrl = isDiscoveryRequireDirectPostingUrl();
+  const requireHash = isDiscoveryRequireDescriptionHash();
 
   for (let index = 0; index < jobs.length; index += 1) {
     const job = jobs[index];
     const attachment = job.gpt_evaluation;
 
     if (!attachment) {
-      if (required) {
+      if (requireEvidence || requiredVersion || requireRemoteUs || requireDirectUrl || requireHash) {
         throw new DiscoveryGptAdmissionGateError(
-          `Job at index ${index} requires gpt_evaluation when DISCOVERY_REQUIRE_GPT_EVALUATION is enabled`,
+          `Job at index ${index} requires gpt_evaluation when discovery quality gates are enabled`,
         );
       }
       continue;
@@ -173,6 +188,21 @@ export async function assertDiscoveryJobsGptAdmissionGate(
     const storedVersion = String(stored.evaluation_version || DEFAULT_GPT_EVALUATION_VERSION);
     const attachmentVersion =
       attachment.evaluation_version || DEFAULT_GPT_EVALUATION_VERSION;
+    const storedHash =
+      stored.description_hash == null ? "" : String(stored.description_hash).trim();
+    const providedHash = (attachment.description_hash || "").trim();
+    const storedRemote =
+      stored.remote_scope == null ? null : String(stored.remote_scope);
+    const storedDirect =
+      stored.direct_posting_url_verified == null
+        ? null
+        : Boolean(stored.direct_posting_url_verified);
+    const storedNorm =
+      stored.normalization_version == null
+        ? null
+        : String(stored.normalization_version);
+    const storedPostingStatus =
+      stored.posting_status == null ? null : String(stored.posting_status);
 
     if (storedVersion !== attachmentVersion) {
       throw new DiscoveryGptAdmissionGateError(
@@ -180,9 +210,12 @@ export async function assertDiscoveryJobsGptAdmissionGate(
       );
     }
 
-    const storedHash =
-      stored.description_hash == null ? "" : String(stored.description_hash).trim();
-    const providedHash = (attachment.description_hash || "").trim();
+    if (requiredVersion && storedVersion !== requiredVersion) {
+      throw new DiscoveryGptAdmissionGateError(
+        `Job at index ${index} requires evaluation_version=${requiredVersion} (got ${storedVersion})`,
+      );
+    }
+
     if (providedHash && storedHash && providedHash !== storedHash) {
       throw new DiscoveryGptAdmissionGateError(
         `Job at index ${index} description_hash mismatch for evaluation_id ${attachment.evaluation_id}`,
@@ -191,6 +224,38 @@ export async function assertDiscoveryJobsGptAdmissionGate(
     if (providedHash && !storedHash) {
       throw new DiscoveryGptAdmissionGateError(
         `Job at index ${index} description_hash provided but stored evaluation has none`,
+      );
+    }
+    if (
+      attachment.normalization_version &&
+      storedNorm &&
+      attachment.normalization_version !== storedNorm
+    ) {
+      throw new DiscoveryGptAdmissionGateError(
+        `Job at index ${index} normalization_version mismatch for evaluation_id ${attachment.evaluation_id}`,
+      );
+    }
+    if (attachment.remote_scope && storedRemote && attachment.remote_scope !== storedRemote) {
+      throw new DiscoveryGptAdmissionGateError(
+        `Job at index ${index} remote_scope mismatch for evaluation_id ${attachment.evaluation_id}`,
+      );
+    }
+    if (
+      attachment.direct_posting_url_verified != null &&
+      storedDirect != null &&
+      attachment.direct_posting_url_verified !== storedDirect
+    ) {
+      throw new DiscoveryGptAdmissionGateError(
+        `Job at index ${index} direct_posting_url_verified mismatch for evaluation_id ${attachment.evaluation_id}`,
+      );
+    }
+    if (
+      attachment.posting_status &&
+      storedPostingStatus &&
+      attachment.posting_status !== storedPostingStatus
+    ) {
+      throw new DiscoveryGptAdmissionGateError(
+        `Job at index ${index} posting_status mismatch for evaluation_id ${attachment.evaluation_id}`,
       );
     }
 
@@ -204,21 +269,63 @@ export async function assertDiscoveryJobsGptAdmissionGate(
         `Job at index ${index} references evaluation ${attachment.evaluation_id} with score below ${GPT_QUALIFIED_THRESHOLD}`,
       );
     }
-
-    if (attachment.gpt_decision !== "QUALIFIED") {
-      throw new DiscoveryGptAdmissionGateError(
-        `Job at index ${index} gpt_decision must be QUALIFIED`,
-      );
-    }
-    if (attachment.gpt_relevance_score < GPT_QUALIFIED_THRESHOLD) {
-      throw new DiscoveryGptAdmissionGateError(
-        `Job at index ${index} gpt_relevance_score must be >= ${GPT_QUALIFIED_THRESHOLD}`,
-      );
-    }
     if (Number(attachment.gpt_relevance_score) !== storedScore) {
       throw new DiscoveryGptAdmissionGateError(
         `Job at index ${index} gpt_relevance_score does not match stored evaluation`,
       );
+    }
+
+    const enforceV2 =
+      isGptFitV2(storedVersion) ||
+      requireRemoteUs ||
+      requireDirectUrl ||
+      requireHash ||
+      (requiredVersion != null && isGptFitV2(requiredVersion));
+
+    if (
+      (enforceV2 || requireDirectUrl) &&
+      isDeterministicallyInvalidPostingUrl(job.url)
+    ) {
+      throw new DiscoveryGptAdmissionGateError(
+        `Job at index ${index} URL is not a direct job posting`,
+      );
+    }
+
+    if (enforceV2 || requireRemoteUs) {
+      if (storedRemote !== "US_NATIONWIDE") {
+        throw new DiscoveryGptAdmissionGateError(
+          `Job at index ${index} requires remote_scope=US_NATIONWIDE (got ${storedRemote ?? "null"})`,
+        );
+      }
+    }
+
+    if (enforceV2 || requireDirectUrl) {
+      if (storedDirect !== true) {
+        throw new DiscoveryGptAdmissionGateError(
+          `Job at index ${index} requires direct_posting_url_verified=true`,
+        );
+      }
+    }
+
+    if (enforceV2 || requireHash) {
+      if (!isCanonicalDescriptionHash(storedHash)) {
+        throw new DiscoveryGptAdmissionGateError(
+          `Job at index ${index} requires non-empty canonical description_hash on stored evaluation`,
+        );
+      }
+      if (!storedNorm) {
+        throw new DiscoveryGptAdmissionGateError(
+          `Job at index ${index} requires normalization_version on stored evaluation`,
+        );
+      }
+    }
+
+    if (enforceV2) {
+      if (storedPostingStatus !== "OPEN") {
+        throw new DiscoveryGptAdmissionGateError(
+          `Job at index ${index} requires posting_status=OPEN (got ${storedPostingStatus ?? "null"})`,
+        );
+      }
     }
   }
 }

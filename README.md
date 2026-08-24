@@ -316,6 +316,9 @@ Schema migrations:
 5. `remote_mcp/migrations/005_discovery_inbox.sql` — raw ChatGPT inbox (`discovery_inbox_batches`; does **not** replace `discovery_runs`)
 6. `remote_mcp/migrations/006_discovery_source_rotation.sql` — ordered discovery source rotation / checkpoints
 7. `remote_mcp/migrations/007_discovery_gpt_evaluations.sql` — GPT admission evaluations (`discovery_gpt_evaluations`; separate from Python `job_evaluations`)
+8. `remote_mcp/migrations/008_discovery_gpt_v2_quality_gates.sql` — additive `gpt-fit-v2` columns (`remote_scope`, `direct_posting_url_verified`, `normalization_version`, `posting_status`, `posting_status_verified_at`) plus CHECK constraints for v2 QUALIFIED structural integrity (v1 rows unaffected; idempotent re-run)
+
+Migration 002 notes:
 
    - Detects existing `jobs.id` type
    - If UUID: preserves values; backfills NULLs only
@@ -397,15 +400,36 @@ python -m job_agent.examples.automated_daily_run
 4. `list_recent_jobs` — `days`, `limit`, `offset`
 5. `delete_job` — `id`
 
-6. `submit_discovery_batch` — ChatGPT jobs (`jobs`, `source`, `metadata`). Nested `gpt_evaluation` (when present) must include `evaluation_id`, `gpt_relevance_score`, `gpt_decision=QUALIFIED`, `evaluation_version`, and optional `reasoning_summary`, and must match a stored QUALIFIED evaluation (score >= 70, matching identity/version/hash). When `DISCOVERY_REQUIRE_GPT_EVALUATION=true`, every job must include that attachment. Default of the flag is `false` for rollout; production must set it to `true` after deployment verification. Rejected jobs are not accepted into the inbox.
+6. `submit_discovery_batch` — ChatGPT jobs (`jobs`, `source`, `metadata`). Nested `gpt_evaluation` (when present) must include `evaluation_id`, `gpt_relevance_score`, `gpt_decision=QUALIFIED`, `evaluation_version`, and optional `reasoning_summary`, and must match a stored QUALIFIED evaluation (score >= 70, matching identity/version/hash/remote_scope/URL verification/posting_status). Quality flags: `DISCOVERY_REQUIRED_EVALUATION_VERSION`, `DISCOVERY_REQUIRE_REMOTE_US`, `DISCOVERY_REQUIRE_DIRECT_POSTING_URL`, `DISCOVERY_REQUIRE_DESCRIPTION_HASH` (default off until cutover). Any quality flag implicitly requires stored GPT evidence even if `DISCOVERY_REQUIRE_GPT_EVALUATION` is false. Production already keeps `DISCOVERY_REQUIRE_GPT_EVALUATION=true` — never disable it during v2 rollout. Rejected jobs are not accepted into the inbox.
 7. `get_discovery_batch` — `id`
 8. `list_pending_discovery_batches` — `limit`
 9. `claim_discovery_batch` — optional `id`; pending → processing
 10. `complete_discovery_batch` — `id`; processing → completed
 11. `fail_discovery_batch` — `id`, `error`; processing → failed (payload retained)
 
-12. `check_discovery_candidates` — read-only batch identity preflight (1–100 lightweight candidates). Optional top-level `evaluation_version` (default `gpt-fit-v1`). Candidate objects must not include scores, decisions, or reasoning. Returns identity status plus `prior_gpt_evaluation` / `gpt_reevaluation_required` / `gpt_skip_allowed` / `gpt_reuse_allowed` for deterministic URL or source+external_id matches only. Matching rejected priors may be skipped; matching qualified priors may be reused via `evaluation_id`. Does not score, save, claim, or mutate.
-13. `record_discovery_evaluations` — write 1–100 GPT admission evaluations (`jobs:write`). Requires `client_evaluation_id` (UUID). Idempotent: identical payload retries return the existing record; conflicting payloads for the same ID are rejected. Latest lookups use server `created_at` + `id` (never client `evaluated_at`). Does not create canonical jobs, submit inbox batches, or change application status.
+12. `check_discovery_candidates` — read-only batch identity preflight (1–100 lightweight candidates). Optional top-level `evaluation_version` (default `gpt-fit-v1`; Cycle 2 / quality gates must pass `gpt-fit-v2` explicitly). Candidate objects must not include scores, decisions, or reasoning. Returns identity status plus `prior_gpt_evaluation` / `gpt_reevaluation_required` / `gpt_skip_allowed` / `gpt_reuse_allowed` for deterministic URL or source+external_id matches of that version only. Also returns `posting_url_class` and version config (`requested_evaluation_version`, `default_evaluation_version`, `required_evaluation_version`). `gpt-fit-v1` evidence is never reused for `gpt-fit-v2`. Hash-only identity matches are not used. Does not score, save, claim, or mutate.
+13. `compute_discovery_description_hashes` — read-only (`jobs:read`, `readOnlyHint`/`idempotentHint`). 1–20 `{client_candidate_id, description}` items. Returns `{client_candidate_id, description_hash, normalization_version}` in input order. Hash is `sha256(normalized)[:16]` lowercase hex using Python fingerprint normalization on **extracted/plain text** (not raw HTML). Empty normalized input → `null`. Enforces UTF-8 byte limits (plus Zod character caps). Does not store descriptions or write to the database.
+14. `record_discovery_evaluations` — write 1–100 GPT admission evaluations (`jobs:write`). Requires `client_evaluation_id` (UUID). `gpt-fit-v2` QUALIFIED rows must include `remote_scope=US_NATIONWIDE`, `direct_posting_url_verified=true`, `posting_status=OPEN`, `posting_status_verified_at`, canonical `description_hash`, and `normalization_version`. MCP validates structured evidence; GPT owns URL/open-job verification (MCP does not crawl). Idempotent: identical payload retries return the existing record; conflicting payloads for the same ID are rejected. Latest lookups use server `created_at` + `id`. Does not create canonical jobs, submit inbox batches, or change application status.
+
+### Milestone 3A (`gpt-fit-v2`) production rollout
+
+Production already has `DISCOVERY_REQUIRE_GPT_EVALUATION=true`. Correct order:
+
+1. Apply migration `008_discovery_gpt_v2_quality_gates.sql`
+2. Deploy code while keeping existing `gpt-fit-v1` enforcement active
+3. Keep `DISCOVERY_REQUIRE_GPT_EVALUATION=true` (never temporarily disable)
+4. Leave `DISCOVERY_REQUIRED_EVALUATION_VERSION` absent or `gpt-fit-v1` initially
+5. Smoke-test `compute_discovery_description_hashes` and `gpt-fit-v2` evidence recording
+6. Configure all v2 settings together:
+   - `DISCOVERY_REQUIRED_EVALUATION_VERSION=gpt-fit-v2`
+   - `DISCOVERY_REQUIRE_REMOTE_US=true`
+   - `DISCOVERY_REQUIRE_DIRECT_POSTING_URL=true`
+   - `DISCOVERY_REQUIRE_DESCRIPTION_HASH=true`
+7. Redeploy once
+8. Refresh or recreate the ChatGPT plugin
+9. Run negative and positive smoke tests
+
+Flag safety: any quality flag being true implicitly requires stored GPT evidence (never silently accept without it).
 
 14. `get_discovery_rotation` — read-only; ordered enabled sources, current cursor, cycle ID, latest run status.
 15. `claim_next_discovery_source` — atomically claim the current source (`run_id`, `cycle_id`, source, `attempt_number`, checkpoint). Blocks concurrent active claims. Stale claims consume one attempt: below max they are `failed` and the same source is reclaimed; at `DISCOVERY_SOURCE_MAX_ATTEMPTS` the stale run becomes `skipped_after_failures` and the next enabled source is claimed in the same call (`stale_source_skipped`, `stale_source_key`, `recovered_stale_run_id`).

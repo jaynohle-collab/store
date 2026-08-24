@@ -680,7 +680,7 @@ describe("UTF-8 description size limits", () => {
         items: [{ client_candidate_id: "a", description: "Build production LLM agents." }],
       }).success,
     ).toBe(true);
-    const accented = "Ã©".repeat(50_000);
+    const accented = "\u00e9".repeat(50_000);
     expect(utf8ByteLength(accented)).toBe(100_000);
     expect(
       computeDiscoveryDescriptionHashesSchema.safeParse({
@@ -690,7 +690,7 @@ describe("UTF-8 description size limits", () => {
   });
 
   it("rejects a description just over the UTF-8 byte cap", () => {
-    const over = "Ã©".repeat(50_001);
+    const over = "\u00e9".repeat(50_001);
     expect(utf8ByteLength(over)).toBeGreaterThan(MAX_DESCRIPTION_BYTES);
     expect(
       computeDiscoveryDescriptionHashesSchema.safeParse({
@@ -700,7 +700,7 @@ describe("UTF-8 description size limits", () => {
   });
 
   it("rejects emoji batches that exceed the aggregate UTF-8 byte cap", () => {
-    const chunk = "ðŸ˜€".repeat(20_000);
+    const chunk = "\u{1F600}".repeat(20_000);
     expect(utf8ByteLength(chunk) * 6).toBeGreaterThan(MAX_DESCRIPTION_BYTES_TOTAL);
     expect(
       computeDiscoveryDescriptionHashesSchema.safeParse({

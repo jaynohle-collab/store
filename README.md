@@ -379,6 +379,13 @@ python -m job_agent.examples.automated_daily_run
 
 12. `check_discovery_candidates` — read-only batch identity preflight (1–100 lightweight candidates). Returns `KNOWN_UNCHANGED` / `UPDATED_POSTING` / `POSSIBLE_CROSS_SOURCE` / `UNSEEN` with matched posting/canonical ids and `previously_applied`. Latest `prior_evaluation` is included only for deterministic posting matches (`normalized_url` or `source_external_id`). Does not score, save, claim, or mutate.
 
+13. `get_discovery_rotation` — read-only; ordered enabled sources, current cursor, cycle ID, latest run status.
+14. `claim_next_discovery_source` — atomically claim the current source (`run_id`, `cycle_id`, source, `attempt_number`, checkpoint). Blocks concurrent active claims. Stale claims consume one attempt: below max they are `failed` and the same source is reclaimed; at `DISCOVERY_SOURCE_MAX_ATTEMPTS` the stale run becomes `skipped_after_failures` and the next enabled source is claimed in the same call (`stale_source_skipped`, `stale_source_key`, `recovered_stale_run_id`).
+15. `complete_discovery_source` — `run_id`, counters, optional `checkpoint`; marks completed and advances to the next enabled source (wraps to a new cycle at ashby after the last). Advances even when `qualified_count` is 0 and resets that source's failure count.
+16. `fail_discovery_source` — `run_id`, `error`, optional `checkpoint`; records a sanitized error. Below `DISCOVERY_SOURCE_MAX_ATTEMPTS` (default 3) the cursor stays on the same source (`retry_required: true`). At the limit the run is `skipped_after_failures`, the cursor auto-advances (`auto_advanced: true`), and returns `next_source_key` / `next_cycle_id`. Skipped runs are not successful zero-result completions.
+
+Rotation tools do not crawl, call GPT, score, or persist jobs. Counter chain validated: `submitted_count <= qualified_count <= evaluated_count <= discovered_count`, `preflight_skipped_count <= discovered_count`. Checkpoint size capped by `DISCOVERY_SOURCE_CHECKPOINT_MAX_BYTES` (default 64 KiB). Initial source order: ashby → greenhouse → lever → workday → company_careers.
+
 `save_job` also accepts optional `description_hash` and validates `posted_date` as an ISO date or offset datetime.
 
 Inbox `remote_status` is `""` / `Remote` / `Hybrid` / `Onsite`. `posted_date` is `""` or `YYYY-MM-DD`. Max batch size is `DISCOVERY_MAX_JOBS` (default 100).

@@ -226,6 +226,10 @@ class RemoteMcpMemoryAdapter:
             "claim_discovery_batch",
             "complete_discovery_batch",
             "fail_discovery_batch",
+            "get_discovery_rotation",
+            "claim_next_discovery_source",
+            "complete_discovery_source",
+            "fail_discovery_source",
         }:
             return await self.client.call_tool(name, arguments)
 

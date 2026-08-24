@@ -52,6 +52,11 @@ export const TOOL_PERMISSIONS: Record<string, JobScope> = {
   claim_discovery_batch: SCOPES.WRITE,
   complete_discovery_batch: SCOPES.WRITE,
   fail_discovery_batch: SCOPES.WRITE,
+  // Discovery source rotation / checkpoint (no crawl / score / job persistence)
+  get_discovery_rotation: SCOPES.READ,
+  claim_next_discovery_source: SCOPES.WRITE,
+  complete_discovery_source: SCOPES.WRITE,
+  fail_discovery_source: SCOPES.WRITE,
 };
 
 export function getAuth0Issuer(): string | undefined {

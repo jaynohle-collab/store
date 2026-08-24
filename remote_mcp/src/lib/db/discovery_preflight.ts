@@ -4,6 +4,7 @@
  */
 
 import { getSql } from "./client";
+import { loadLatestGptEvaluationsForPreflight } from "./discovery_gpt_evaluations";
 import {
   checkDiscoveryCandidatesSchema,
   companyHashKey,
@@ -291,6 +292,27 @@ export async function loadDiscoveryPreflightIndex(
     }
   }
 
+  const gptLookup = await loadLatestGptEvaluationsForPreflight({
+    normalizedUrls: urls,
+    sourceExternalKeys: externalPairs,
+    sources: [
+      ...new Set(
+        normalized
+          .filter((c) => c.external_job_id_key)
+          .map((c) => c.source),
+      ),
+    ],
+    externalJobIds: [
+      ...new Set(
+        normalized
+          .map((c) => c.external_job_id_key)
+          .filter((value): value is string => Boolean(value)),
+      ),
+    ],
+  });
+  index.gptByNormalizedUrl = gptLookup.byNormalizedUrl;
+  index.gptBySourceExternal = gptLookup.bySourceExternal;
+
   return index;
 }
 
@@ -301,7 +323,9 @@ export async function checkDiscoveryCandidates(
   const parsed = checkDiscoveryCandidatesSchema.parse(input);
   const index = await loadDiscoveryPreflightIndex(parsed);
   return {
-    results: resolveDiscoveryPreflightResults(parsed.candidates, index),
+    results: resolveDiscoveryPreflightResults(parsed.candidates, index, {
+      evaluation_version: parsed.evaluation_version,
+    }),
   };
 }
 

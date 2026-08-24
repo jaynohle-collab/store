@@ -209,6 +209,7 @@ class RemoteMcpMemoryAdapter:
             "find_posting_by_url",
             "find_posting_by_external_id",
             "check_discovery_candidates",
+            "record_discovery_evaluations",
             "record_application",
             "get_application",
             "list_applications",

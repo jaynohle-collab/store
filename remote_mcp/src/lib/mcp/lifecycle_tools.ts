@@ -67,8 +67,11 @@ export function registerLifecycleTools(server: McpServer): void {
       title: "Check Discovery Candidates",
       description:
         "Read-only batch identity preflight for up to 100 lightweight job candidates. " +
-        "Returns deterministic posting/canonical signals before full description evaluation. " +
-        "Does not score, rank, save, claim, or mutate jobs." +
+        "Returns deterministic posting/canonical signals and prior GPT admission lookups " +
+        "before full description evaluation. Optional top-level evaluation_version " +
+        "(default gpt-fit-v1). Does not score, rank, save, claim, or mutate jobs. " +
+        "prior_gpt_evaluation is returned only for deterministic URL or source+external_id matches. " +
+        "Matching rejected priors may set gpt_skip_allowed; matching qualified priors may set gpt_reuse_allowed with evaluation_id." +
         PERSISTENCE_NOTE,
       inputSchema: checkDiscoveryCandidatesSchema,
       annotations: {

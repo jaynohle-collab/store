@@ -13,7 +13,11 @@ import {
 } from "../db/inbox";
 
 const PERSISTENCE_NOTE =
-  " Persistence layer only — stores raw ChatGPT discovery JSON. Does not score jobs, detect duplicates, classify reposts, or create canonical jobs.";
+  " Persistence layer only — stores raw ChatGPT discovery JSON for later Python processing. " +
+  "Does not score jobs itself, detect duplicates, classify reposts, or create canonical jobs. " +
+  "Optional gpt_evaluation must reference a stored QUALIFIED evaluation (score >= 70). " +
+  "When DISCOVERY_REQUIRE_GPT_EVALUATION=true, every job must include a matching stored evaluation. " +
+  "GPT admission scoring is separate from Python profile-v1 ranking.";
 
 function getAuth(context: { http?: { authInfo?: AuthInfo } }): AuthInfo | undefined {
   return context.http?.authInfo;

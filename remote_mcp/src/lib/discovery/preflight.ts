@@ -5,6 +5,12 @@
 
 import { z } from "zod";
 
+import {
+  DEFAULT_GPT_EVALUATION_VERSION,
+  descriptionHashSchema,
+  resolveGptPreflightFields,
+  type PriorGptEvaluationSummary,
+} from "./gpt_evaluation";
 import { APPLIED_OR_LATER_STATUSES } from "../dashboard/constants";
 import {
   normalizeCompanyKey,
@@ -21,10 +27,16 @@ const FORBIDDEN_CANDIDATE_FIELDS = [
   "reasoning",
   "disposition",
   "candidate_score",
+  "gpt_relevance_score",
+  "gpt_decision",
+  "hard_rejection_reason",
+  "reasoning_summary",
+  "evaluation_version",
 ] as const;
 
 const requiredTextSchema = z
   .string()
+  .max(512)
   .refine((value) => value.trim().length > 0, "must be a non-empty string");
 
 /** Matches discovery inbox: empty string or YYYY-MM-DD. */
@@ -37,15 +49,24 @@ export const discoveryPreflightPostedDateSchema = z.string().refine((value) => {
 
 export const discoveryPreflightCandidateSchema = z
   .object({
-    client_candidate_id: requiredTextSchema,
+    client_candidate_id: z
+      .string()
+      .max(128)
+      .refine((value) => value.trim().length > 0, "must be a non-empty string"),
     company: requiredTextSchema,
     title: requiredTextSchema,
-    url: requiredTextSchema,
-    source: requiredTextSchema,
-    external_job_id: z.string(),
-    location: z.string(),
+    url: z
+      .string()
+      .max(2048)
+      .refine((value) => value.trim().length > 0, "must be a non-empty string"),
+    source: z
+      .string()
+      .max(128)
+      .refine((value) => value.trim().length > 0, "must be a non-empty string"),
+    external_job_id: z.string().max(256),
+    location: z.string().max(512),
     posted_date: discoveryPreflightPostedDateSchema,
-    description_hash: z.string(),
+    description_hash: descriptionHashSchema,
   })
   .strict()
   .superRefine((candidate, ctx) => {
@@ -62,6 +83,7 @@ export const discoveryPreflightCandidateSchema = z
 export const checkDiscoveryCandidatesSchema = z
   .object({
     candidates: z.array(discoveryPreflightCandidateSchema).min(1).max(100),
+    evaluation_version: z.string().min(1).max(64).optional(),
   })
   .strict();
 
@@ -99,6 +121,10 @@ export type DiscoveryPreflightResult = {
   existing_description_hash: string | null;
   previously_applied: boolean;
   prior_evaluation: PriorEvaluationSummary | null;
+  prior_gpt_evaluation: PriorGptEvaluationSummary | null;
+  gpt_reevaluation_required: boolean;
+  gpt_skip_allowed: boolean;
+  gpt_reuse_allowed: boolean;
 };
 
 export type NormalizedPreflightCandidate = DiscoveryPreflightCandidate & {
@@ -143,6 +169,12 @@ export type PreflightEvaluationRow = {
   profile_version: string | null;
 };
 
+export type PreflightGptEvaluationRow = PriorGptEvaluationSummary & {
+  normalized_url: string | null;
+  source: string;
+  external_job_id: string | null;
+};
+
 export type DiscoveryPreflightIndex = {
   postingsByNormalizedUrl: Map<string, PreflightPostingRow>;
   postingsBySourceExternal: Map<string, PreflightPostingRow>;
@@ -152,6 +184,8 @@ export type DiscoveryPreflightIndex = {
   applicationsByPostingId: Map<string, PreflightApplicationRow[]>;
   applicationsByCanonicalId: Map<string, PreflightApplicationRow[]>;
   evaluationsByPostingId: Map<string, PreflightEvaluationRow>;
+  gptByNormalizedUrl: Map<string, PreflightGptEvaluationRow>;
+  gptBySourceExternal: Map<string, PreflightGptEvaluationRow>;
 };
 
 export function normalizePreflightCandidate(
@@ -239,6 +273,7 @@ function resultFromPosting(
   posting: PreflightPostingRow,
   matchedBy: "normalized_url" | "source_external_id",
   index: DiscoveryPreflightIndex,
+  requestedEvaluationVersion: string,
 ): DiscoveryPreflightResult {
   const candidateHash = candidate.description_hash.trim();
   const existingHash = asString(posting.description_hash);
@@ -249,6 +284,24 @@ function resultFromPosting(
 
   const postingId = String(posting.id);
   const canonicalJobId = String(posting.canonical_job_id);
+
+  let priorGpt: PriorGptEvaluationSummary | null = null;
+  if (matchedBy === "normalized_url" && candidate.normalized_url) {
+    priorGpt = index.gptByNormalizedUrl.get(candidate.normalized_url) ?? null;
+  } else if (matchedBy === "source_external_id" && candidate.external_job_id_key) {
+    priorGpt =
+      index.gptBySourceExternal.get(
+        sourceExternalKey(candidate.source, candidate.external_job_id_key),
+      ) ?? null;
+  }
+
+  const gptFields = resolveGptPreflightFields({
+    matchedBy,
+    candidateDescriptionHash: candidate.description_hash,
+    priorGpt,
+    requestedEvaluationVersion,
+  });
+
   return {
     client_candidate_id: candidate.client_candidate_id,
     identity_status: identityStatus,
@@ -260,6 +313,10 @@ function resultFromPosting(
     existing_description_hash: existingHash,
     previously_applied: previouslyAppliedFor(index, postingId, canonicalJobId),
     prior_evaluation: mapEvaluationSummary(index.evaluationsByPostingId.get(postingId)),
+    prior_gpt_evaluation: gptFields.prior_gpt_evaluation,
+    gpt_reevaluation_required: gptFields.gpt_reevaluation_required,
+    gpt_skip_allowed: gptFields.gpt_skip_allowed,
+    gpt_reuse_allowed: gptFields.gpt_reuse_allowed,
   };
 }
 
@@ -348,14 +405,24 @@ function findCanonicalSignalMatch(
 export function resolveDiscoveryPreflightResults(
   candidates: DiscoveryPreflightCandidate[],
   index: DiscoveryPreflightIndex,
+  options?: { evaluation_version?: string },
 ): DiscoveryPreflightResult[] {
+  const requestedEvaluationVersion =
+    options?.evaluation_version?.trim() || DEFAULT_GPT_EVALUATION_VERSION;
+
   return candidates.map((raw) => {
     const candidate = normalizePreflightCandidate(raw);
 
     if (candidate.normalized_url) {
       const byUrl = index.postingsByNormalizedUrl.get(candidate.normalized_url);
       if (byUrl) {
-        return resultFromPosting(candidate, byUrl, "normalized_url", index);
+        return resultFromPosting(
+          candidate,
+          byUrl,
+          "normalized_url",
+          index,
+          requestedEvaluationVersion,
+        );
       }
     }
 
@@ -363,7 +430,13 @@ export function resolveDiscoveryPreflightResults(
       const key = sourceExternalKey(candidate.source, candidate.external_job_id_key);
       const byExternal = index.postingsBySourceExternal.get(key);
       if (byExternal) {
-        return resultFromPosting(candidate, byExternal, "source_external_id", index);
+        return resultFromPosting(
+          candidate,
+          byExternal,
+          "source_external_id",
+          index,
+          requestedEvaluationVersion,
+        );
       }
     }
 
@@ -384,8 +457,11 @@ export function resolveDiscoveryPreflightResults(
           ? asString(posting.description_hash)
           : null,
         previously_applied: previouslyAppliedFor(index, postingId, canonicalJobId),
-        // Evaluations only for deterministic posting matches.
         prior_evaluation: null,
+        prior_gpt_evaluation: null,
+        gpt_reevaluation_required: true,
+        gpt_skip_allowed: false,
+        gpt_reuse_allowed: false,
       };
     }
 
@@ -400,6 +476,10 @@ export function resolveDiscoveryPreflightResults(
       existing_description_hash: null,
       previously_applied: false,
       prior_evaluation: null,
+      prior_gpt_evaluation: null,
+      gpt_reevaluation_required: true,
+      gpt_skip_allowed: false,
+      gpt_reuse_allowed: false,
     };
   });
 }
@@ -414,5 +494,7 @@ export function emptyPreflightIndex(): DiscoveryPreflightIndex {
     applicationsByPostingId: new Map(),
     applicationsByCanonicalId: new Map(),
     evaluationsByPostingId: new Map(),
+    gptByNormalizedUrl: new Map(),
+    gptBySourceExternal: new Map(),
   };
 }

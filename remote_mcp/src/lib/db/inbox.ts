@@ -1,6 +1,14 @@
 import { z } from "zod";
 
 import { getSql } from "./client";
+import { getDiscoveryGptEvaluationById } from "./discovery_gpt_evaluations";
+import {
+  DEFAULT_GPT_EVALUATION_VERSION,
+  GPT_QUALIFIED_THRESHOLD,
+  gptAdmissionAttachmentSchema,
+  isDiscoveryGptEvaluationRequired,
+} from "../discovery/gpt_evaluation";
+import { normalizeJobUrl } from "../discovery/normalize";
 
 function mapRow<T extends Record<string, unknown>>(row: Record<string, unknown>): T {
   const out: Record<string, unknown> = {};
@@ -27,6 +35,12 @@ const FORBIDDEN_DISCOVERY_FIELDS = [
   "recommendation",
   "candidate_score",
   "disposition",
+  "gpt_relevance_score",
+  "gpt_decision",
+  "hard_rejection_reason",
+  "reasoning_summary",
+  "evaluation_version",
+  "evaluation_id",
 ] as const;
 
 const postedDateSchema = z.string().refine((value) => {
@@ -53,6 +67,7 @@ export const discoveryJobSchema = z
     remote_status: z.enum(ALLOWED_REMOTE_STATUSES),
     salary: z.string(),
     posted_date: postedDateSchema,
+    gpt_evaluation: gptAdmissionAttachmentSchema.optional(),
   })
   .strict()
   .superRefine((job, ctx) => {
@@ -61,6 +76,20 @@ export const discoveryJobSchema = z
         ctx.addIssue({
           code: "custom",
           message: `Discovery jobs must not include '${field}'`,
+        });
+      }
+    }
+    if (job.gpt_evaluation) {
+      if (job.gpt_evaluation.gpt_relevance_score < GPT_QUALIFIED_THRESHOLD) {
+        ctx.addIssue({
+          code: "custom",
+          message: `gpt_evaluation requires gpt_relevance_score >= ${GPT_QUALIFIED_THRESHOLD}`,
+        });
+      }
+      if (job.gpt_evaluation.gpt_decision !== "QUALIFIED") {
+        ctx.addIssue({
+          code: "custom",
+          message: "Rejected GPT evaluations cannot be submitted to the discovery inbox",
         });
       }
     }
@@ -89,10 +118,116 @@ function assertMaxJobs(jobs: unknown[]): void {
   }
 }
 
+export class DiscoveryGptAdmissionGateError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DiscoveryGptAdmissionGateError";
+  }
+}
+
+function storedMatchesJobIdentity(
+  stored: Record<string, unknown>,
+  job: z.infer<typeof discoveryJobSchema>,
+): boolean {
+  const jobUrl = normalizeJobUrl(job.url);
+  const storedUrl =
+    stored.normalized_url == null ? null : String(stored.normalized_url);
+  // Inbox jobs expose URL as the deterministic identity key.
+  return Boolean(jobUrl && storedUrl && jobUrl === storedUrl);
+}
+
+/** Validate optional/required GPT admission attachments against stored evidence. */
+export async function assertDiscoveryJobsGptAdmissionGate(
+  jobs: z.infer<typeof discoveryJobSchema>[],
+): Promise<void> {
+  const required = isDiscoveryGptEvaluationRequired();
+
+  for (let index = 0; index < jobs.length; index += 1) {
+    const job = jobs[index];
+    const attachment = job.gpt_evaluation;
+
+    if (!attachment) {
+      if (required) {
+        throw new DiscoveryGptAdmissionGateError(
+          `Job at index ${index} requires gpt_evaluation when DISCOVERY_REQUIRE_GPT_EVALUATION is enabled`,
+        );
+      }
+      continue;
+    }
+
+    const stored = await getDiscoveryGptEvaluationById(attachment.evaluation_id);
+    if (!stored) {
+      throw new DiscoveryGptAdmissionGateError(
+        `Job at index ${index} references unknown evaluation_id ${attachment.evaluation_id}`,
+      );
+    }
+
+    if (!storedMatchesJobIdentity(stored, job)) {
+      throw new DiscoveryGptAdmissionGateError(
+        `Job at index ${index} gpt_evaluation identity does not match stored evaluation ${attachment.evaluation_id}`,
+      );
+    }
+
+    const storedDecision = String(stored.gpt_decision);
+    const storedScore = Number(stored.gpt_relevance_score);
+    const storedVersion = String(stored.evaluation_version || DEFAULT_GPT_EVALUATION_VERSION);
+    const attachmentVersion =
+      attachment.evaluation_version || DEFAULT_GPT_EVALUATION_VERSION;
+
+    if (storedVersion !== attachmentVersion) {
+      throw new DiscoveryGptAdmissionGateError(
+        `Job at index ${index} evaluation_version mismatch for evaluation_id ${attachment.evaluation_id}`,
+      );
+    }
+
+    const storedHash =
+      stored.description_hash == null ? "" : String(stored.description_hash).trim();
+    const providedHash = (attachment.description_hash || "").trim();
+    if (providedHash && storedHash && providedHash !== storedHash) {
+      throw new DiscoveryGptAdmissionGateError(
+        `Job at index ${index} description_hash mismatch for evaluation_id ${attachment.evaluation_id}`,
+      );
+    }
+    if (providedHash && !storedHash) {
+      throw new DiscoveryGptAdmissionGateError(
+        `Job at index ${index} description_hash provided but stored evaluation has none`,
+      );
+    }
+
+    if (storedDecision !== "QUALIFIED") {
+      throw new DiscoveryGptAdmissionGateError(
+        `Job at index ${index} references non-QUALIFIED evaluation ${attachment.evaluation_id}`,
+      );
+    }
+    if (!(storedScore >= GPT_QUALIFIED_THRESHOLD)) {
+      throw new DiscoveryGptAdmissionGateError(
+        `Job at index ${index} references evaluation ${attachment.evaluation_id} with score below ${GPT_QUALIFIED_THRESHOLD}`,
+      );
+    }
+
+    if (attachment.gpt_decision !== "QUALIFIED") {
+      throw new DiscoveryGptAdmissionGateError(
+        `Job at index ${index} gpt_decision must be QUALIFIED`,
+      );
+    }
+    if (attachment.gpt_relevance_score < GPT_QUALIFIED_THRESHOLD) {
+      throw new DiscoveryGptAdmissionGateError(
+        `Job at index ${index} gpt_relevance_score must be >= ${GPT_QUALIFIED_THRESHOLD}`,
+      );
+    }
+    if (Number(attachment.gpt_relevance_score) !== storedScore) {
+      throw new DiscoveryGptAdmissionGateError(
+        `Job at index ${index} gpt_relevance_score does not match stored evaluation`,
+      );
+    }
+  }
+}
+
 export async function submitDiscoveryBatch(
   input: z.infer<typeof submitDiscoveryBatchSchema>,
 ): Promise<DiscoveryInboxBatchRecord> {
   assertMaxJobs(input.jobs);
+  await assertDiscoveryJobsGptAdmissionGate(input.jobs);
   const sql = getSql();
   const payload = JSON.stringify({ jobs: input.jobs });
   const metadata = JSON.stringify(input.metadata ?? {});

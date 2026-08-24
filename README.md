@@ -13,9 +13,15 @@ Personal job-search pipeline with a clear responsibility split:
 ```
 ChatGPT
    ↓
-web job discovery
+web job discovery (lightweight candidates)
    ↓
-submit_discovery_batch (MCP)
+check_discovery_candidates (MCP read-only preflight)
+   ↓
+full description fetch + GPT admission scoring (gpt-fit-v1)
+   ↓
+record_discovery_evaluations (MCP — qualified + rejected)
+   ↓
+submit_discovery_batch (QUALIFIED jobs only, optional gpt_evaluation)
    ↓
 raw discovery inbox (Neon)
    ↓
@@ -24,7 +30,7 @@ python -m job_agent.examples.process_discovery_inbox
 Python Job Agent
     ├─ normalize
     ├─ SAME_POSTING / REPOST / NEW_JOB (lifecycle)
-    ├─ profile-v1 candidate scoring
+    ├─ profile-v1 ranking score (dashboard; separate from GPT admission)
     └─ evaluation + persist decisions
    ↓
 existing MCP persistence
@@ -32,13 +38,29 @@ existing MCP persistence
 Neon / Dashboard
 ```
 
-ChatGPT **only** finds current jobs, extracts raw fields, and submits them.
-It must **not** score candidates, decide duplicates/reposts, create canonical jobs, or create evaluations.
-The Python agent remains the sole owner of normalization, lifecycle classification, scoring, evaluation persistence, and final persist decisions.
+### GPT admission vs Python ranking
+
+| Score | Owner | Purpose | Storage |
+|---|---|---|---|
+| GPT admission (`gpt-fit-v1`) | ChatGPT | Gate which jobs enter the discovery inbox | `discovery_gpt_evaluations` via `record_discovery_evaluations` |
+| Python ranking (`profile-v1`) | Python job agent | Dashboard ranking / match display | `job_evaluations` via `save_job_evaluation` |
+
+These scores must stay separate. MCP never computes either score; it stores GPT admission evidence and Python ranking snapshots.
+
+### Required ChatGPT discovery workflow
+
+1. **Preflight** — `check_discovery_candidates` with lightweight candidates (no scores/decisions/reasoning in candidate objects). Optional top-level `evaluation_version` (default `gpt-fit-v1`).
+2. **Full description evaluation** — for candidates that need GPT reevaluation, fetch full descriptions and apply the `gpt-fit-v1` rubric (threshold 70; hard exclusions → `REJECTED_HARD_RULE`).
+3. **Record all evaluations** — `record_discovery_evaluations` for both QUALIFIED and rejected decisions (idempotent by `client_evaluation_id`; does not create canonical jobs or inbox rows).
+4. **Submit qualified jobs only** — `submit_discovery_batch` with QUALIFIED jobs only. Nested `gpt_evaluation` must include `evaluation_id` referencing stored evidence (`gpt_decision=QUALIFIED`, `gpt_relevance_score >= 70`). When `DISCOVERY_REQUIRE_GPT_EVALUATION=true` (required in production after verification), every job must include matching stored evidence.
+
+Hard exclusions (GPT): closed/expired/archived; internship/junior; frontend-only; pure DevOps/SRE without meaningful AI/backend ownership; non-US; NYC onsite-only; no direct job URL.
+
+ChatGPT **must not** decide duplicates/reposts, create canonical jobs, or write Python `profile-v1` evaluations. MCP remains read-only for preflight identity lookup and stores GPT admission evidence without mutating applications or canonical jobs.
 
 User prompt:
 
-> Find today's matching jobs and submit them.
+> Find today's matching jobs, preflight them, evaluate relevance, record evaluations, and submit only qualified jobs.
 
 Then process the inbox:
 
@@ -71,16 +93,19 @@ Production MCP URL:
 | Concern | Owner |
 |---|---|
 | Current job discovery (web search) | ChatGPT |
+| Identity preflight (`check_discovery_candidates`) | Remote MCP (read-only) |
+| GPT admission scoring (`gpt-fit-v1`) | ChatGPT |
+| GPT evaluation evidence storage | Remote MCP → Neon (`discovery_gpt_evaluations`) |
 | Raw inbox submit/claim/complete/fail | Remote MCP → Neon (`discovery_inbox_batches`) |
 | Normalization | Python job agent |
 | Duplicate / SAME_POSTING / REPOST / NEW_JOB | Python job agent |
-| Scoring / ranking / fit (`profile-v1`) | Python job agent |
-| Persist-or-not decision | Python job agent |
+| Dashboard ranking / fit (`profile-v1`) | Python job agent |
+| Persist-or-not decision (post-inbox) | Python job agent |
 | AuthN / AuthZ for storage API | Auth0 + remote MCP |
 | Job CRUD persistence | Remote MCP → Neon |
 | Application decisions | Python / human — **not** MCP |
 
-ChatGPT and the remote MCP **must not** score jobs, rank jobs, decide candidate fit, perform duplicate/repost decisions, or decide whether a discovered job should be saved.
+ChatGPT owns GPT admission scoring (`gpt-fit-v1`) before inbox submit. MCP stores that evidence and performs identity lookup only. MCP and ChatGPT **must not** perform duplicate/repost decisions, create canonical jobs from discovery evaluations, or overwrite Python `profile-v1` ranking scores.
 
 ## Repository structure
 
@@ -289,6 +314,8 @@ Schema migrations:
 3. `remote_mcp/migrations/003_job_lifecycle.sql` — canonical jobs / postings / applications / `discovery_runs`
 4. `remote_mcp/migrations/004_job_evaluations.sql` — Python evaluation snapshots
 5. `remote_mcp/migrations/005_discovery_inbox.sql` — raw ChatGPT inbox (`discovery_inbox_batches`; does **not** replace `discovery_runs`)
+6. `remote_mcp/migrations/006_discovery_source_rotation.sql` — ordered discovery source rotation / checkpoints
+7. `remote_mcp/migrations/007_discovery_gpt_evaluations.sql` — GPT admission evaluations (`discovery_gpt_evaluations`; separate from Python `job_evaluations`)
 
    - Detects existing `jobs.id` type
    - If UUID: preserves values; backfills NULLs only
@@ -299,7 +326,7 @@ Schema migrations:
 
 Apply against Neon (SQL editor or `psql`). Both use `IF NOT EXISTS` / safe `ADD COLUMN IF NOT EXISTS` and do **not** destroy existing data. There is **no** `UNIQUE(url)` constraint — duplicate policy stays in Python.
 
-`description_hash` is persisted and returned so the Python agent can keep fingerprint-based duplicate detection. `search_jobs` and `list_recent_jobs` support `offset` / `next_offset` pagination so remote history is not capped at 100 rows.
+`description_hash` is persisted and returned so the Python agent can keep fingerprint-based duplicate detection. Canonical format (Python `compute_description_hash` / GPT evaluation validation): **16 lowercase hexadecimal characters** (`sha256(normalized)[:16]`), or empty when unavailable. `search_jobs` and `list_recent_jobs` support `offset` / `next_offset` pagination so remote history is not capped at 100 rows.
 
 Useful indexes: `url`, `company`, `title`, `posted_date`, `created_at`.
 
@@ -370,19 +397,20 @@ python -m job_agent.examples.automated_daily_run
 4. `list_recent_jobs` — `days`, `limit`, `offset`
 5. `delete_job` — `id`
 
-6. `submit_discovery_batch` — raw ChatGPT jobs (`jobs`, `source`, `metadata`)
+6. `submit_discovery_batch` — ChatGPT jobs (`jobs`, `source`, `metadata`). Nested `gpt_evaluation` (when present) must include `evaluation_id`, `gpt_relevance_score`, `gpt_decision=QUALIFIED`, `evaluation_version`, and optional `reasoning_summary`, and must match a stored QUALIFIED evaluation (score >= 70, matching identity/version/hash). When `DISCOVERY_REQUIRE_GPT_EVALUATION=true`, every job must include that attachment. Default of the flag is `false` for rollout; production must set it to `true` after deployment verification. Rejected jobs are not accepted into the inbox.
 7. `get_discovery_batch` — `id`
 8. `list_pending_discovery_batches` — `limit`
 9. `claim_discovery_batch` — optional `id`; pending → processing
 10. `complete_discovery_batch` — `id`; processing → completed
 11. `fail_discovery_batch` — `id`, `error`; processing → failed (payload retained)
 
-12. `check_discovery_candidates` — read-only batch identity preflight (1–100 lightweight candidates). Returns `KNOWN_UNCHANGED` / `UPDATED_POSTING` / `POSSIBLE_CROSS_SOURCE` / `UNSEEN` with matched posting/canonical ids and `previously_applied`. Latest `prior_evaluation` is included only for deterministic posting matches (`normalized_url` or `source_external_id`). Does not score, save, claim, or mutate.
+12. `check_discovery_candidates` — read-only batch identity preflight (1–100 lightweight candidates). Optional top-level `evaluation_version` (default `gpt-fit-v1`). Candidate objects must not include scores, decisions, or reasoning. Returns identity status plus `prior_gpt_evaluation` / `gpt_reevaluation_required` / `gpt_skip_allowed` / `gpt_reuse_allowed` for deterministic URL or source+external_id matches only. Matching rejected priors may be skipped; matching qualified priors may be reused via `evaluation_id`. Does not score, save, claim, or mutate.
+13. `record_discovery_evaluations` — write 1–100 GPT admission evaluations (`jobs:write`). Requires `client_evaluation_id` (UUID). Idempotent: identical payload retries return the existing record; conflicting payloads for the same ID are rejected. Latest lookups use server `created_at` + `id` (never client `evaluated_at`). Does not create canonical jobs, submit inbox batches, or change application status.
 
-13. `get_discovery_rotation` — read-only; ordered enabled sources, current cursor, cycle ID, latest run status.
-14. `claim_next_discovery_source` — atomically claim the current source (`run_id`, `cycle_id`, source, `attempt_number`, checkpoint). Blocks concurrent active claims. Stale claims consume one attempt: below max they are `failed` and the same source is reclaimed; at `DISCOVERY_SOURCE_MAX_ATTEMPTS` the stale run becomes `skipped_after_failures` and the next enabled source is claimed in the same call (`stale_source_skipped`, `stale_source_key`, `recovered_stale_run_id`).
-15. `complete_discovery_source` — `run_id`, counters, optional `checkpoint`; marks completed and advances to the next enabled source (wraps to a new cycle at ashby after the last). Advances even when `qualified_count` is 0 and resets that source's failure count.
-16. `fail_discovery_source` — `run_id`, `error`, optional `checkpoint`; records a sanitized error. Below `DISCOVERY_SOURCE_MAX_ATTEMPTS` (default 3) the cursor stays on the same source (`retry_required: true`). At the limit the run is `skipped_after_failures`, the cursor auto-advances (`auto_advanced: true`), and returns `next_source_key` / `next_cycle_id`. Skipped runs are not successful zero-result completions.
+14. `get_discovery_rotation` — read-only; ordered enabled sources, current cursor, cycle ID, latest run status.
+15. `claim_next_discovery_source` — atomically claim the current source (`run_id`, `cycle_id`, source, `attempt_number`, checkpoint). Blocks concurrent active claims. Stale claims consume one attempt: below max they are `failed` and the same source is reclaimed; at `DISCOVERY_SOURCE_MAX_ATTEMPTS` the stale run becomes `skipped_after_failures` and the next enabled source is claimed in the same call (`stale_source_skipped`, `stale_source_key`, `recovered_stale_run_id`).
+16. `complete_discovery_source` — `run_id`, counters, optional `checkpoint`; marks completed and advances to the next enabled source (wraps to a new cycle at ashby after the last). Advances even when `qualified_count` is 0 and resets that source's failure count.
+17. `fail_discovery_source` — `run_id`, `error`, optional `checkpoint`; records a sanitized error. Below `DISCOVERY_SOURCE_MAX_ATTEMPTS` (default 3) the cursor stays on the same source (`retry_required: true`). At the limit the run is `skipped_after_failures`, the cursor auto-advances (`auto_advanced: true`), and returns `next_source_key` / `next_cycle_id`. Skipped runs are not successful zero-result completions.
 
 Rotation tools do not crawl, call GPT, score, or persist jobs. Counter chain validated: `submitted_count <= qualified_count <= evaluated_count <= discovered_count`, `preflight_skipped_count <= discovered_count`. Checkpoint size capped by `DISCOVERY_SOURCE_CHECKPOINT_MAX_BYTES` (default 64 KiB). Initial source order: ashby → greenhouse → lever → workday → company_careers.
 

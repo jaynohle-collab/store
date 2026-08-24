@@ -55,7 +55,7 @@ describe("discovery preflight identity resolution", () => {
       source: "ashby",
       url: "https://example.com/jobs/1?utm_source=x",
       normalized_url: normalizeJobUrl("https://example.com/jobs/1?utm_source=x"),
-      description_hash: "hash-a",
+      description_hash: "aaaaaaaaaaaaaaaa",
     });
     const index = indexWith((idx) => {
       idx.postingsByNormalizedUrl.set(existing.normalized_url!, existing);
@@ -77,7 +77,7 @@ describe("discovery preflight identity resolution", () => {
           title: "Staff Engineer",
           url: "https://example.com/jobs/1",
           source: "linkedin",
-          description_hash: "hash-a",
+          description_hash: "aaaaaaaaaaaaaaaa",
         }),
       ],
       index,
@@ -97,7 +97,7 @@ describe("discovery preflight identity resolution", () => {
       external_job_id: "REQ-9",
       url: "https://boards.example.com/req-9",
       normalized_url: "https://boards.example.com/req-9",
-      description_hash: "hash-b",
+      description_hash: "bbbbbbbbbbbbbbbb",
     });
     const index = indexWith((idx) => {
       idx.postingsBySourceExternal.set(sourceExternalKey("greenhouse", "REQ-9"), existing);
@@ -120,7 +120,7 @@ describe("discovery preflight identity resolution", () => {
 
     expect(result.identity_status).toBe("KNOWN_UNCHANGED");
     expect(result.matched_by).toBe("source_external_id");
-    expect(result.existing_description_hash).toBe("hash-b");
+    expect(result.existing_description_hash).toBe("bbbbbbbbbbbbbbbb");
   });
 
   it("deterministic identity with changed description hash returns UPDATED_POSTING", () => {
@@ -130,7 +130,7 @@ describe("discovery preflight identity resolution", () => {
       source: "ashby",
       url: "https://example.com/jobs/3",
       normalized_url: "https://example.com/jobs/3",
-      description_hash: "old-hash",
+      description_hash: "1111111111111111",
     });
     const index = indexWith((idx) => {
       idx.postingsByNormalizedUrl.set("https://example.com/jobs/3", existing);
@@ -144,7 +144,7 @@ describe("discovery preflight identity resolution", () => {
           title: "Staff Engineer",
           url: "https://example.com/jobs/3",
           source: "ashby",
-          description_hash: "new-hash",
+          description_hash: "2222222222222222",
         }),
       ],
       index,
@@ -170,7 +170,7 @@ describe("discovery preflight identity resolution", () => {
       source: "ashby",
       url: "https://jobs.ashbyhq.com/agentforge/abc",
       normalized_url: "https://jobs.ashbyhq.com/agentforge/abc",
-      description_hash: "shared-hash",
+      description_hash: "3333333333333333",
       location: "United States",
     });
     const index = indexWith((idx) => {
@@ -187,7 +187,7 @@ describe("discovery preflight identity resolution", () => {
           url: "https://www.linkedin.com/jobs/view/999",
           source: "linkedin",
           location: "United States",
-          description_hash: "shared-hash",
+          description_hash: "3333333333333333",
         }),
       ],
       index,
@@ -302,7 +302,7 @@ describe("discovery preflight identity resolution", () => {
       source: "ashby",
       url: "https://example.com/jobs/8",
       normalized_url: "https://example.com/jobs/8",
-      description_hash: "h8",
+      description_hash: "5555555555555555",
     });
     const index = indexWith((idx) => {
       idx.postingsByNormalizedUrl.set("https://example.com/jobs/8", existing);
@@ -324,7 +324,7 @@ describe("discovery preflight identity resolution", () => {
           title: "Engineer",
           url: "https://example.com/jobs/8",
           source: "ashby",
-          description_hash: "h8",
+          description_hash: "5555555555555555",
         }),
       ],
       index,
@@ -346,7 +346,7 @@ describe("discovery preflight identity resolution", () => {
       source: "ashby",
       url: "https://example.com/jobs/9",
       normalized_url: "https://example.com/jobs/9",
-      description_hash: "stored-hash",
+      description_hash: "6666666666666666",
     });
     const index = indexWith((idx) => {
       idx.postingsByNormalizedUrl.set("https://example.com/jobs/9", existing);
@@ -367,7 +367,7 @@ describe("discovery preflight identity resolution", () => {
     );
 
     expect(result.identity_status).toBe("KNOWN_UNCHANGED");
-    expect(result.existing_description_hash).toBe("stored-hash");
+    expect(result.existing_description_hash).toBe("6666666666666666");
   });
 
   it("preserves input ordering", () => {
@@ -448,12 +448,12 @@ describe("discovery preflight identity resolution", () => {
       source: "ashby",
       url: "https://example.com/jobs/hash",
       normalized_url: "https://example.com/jobs/hash",
-      description_hash: "lonely-hash",
+      description_hash: "4444444444444444",
     });
     const index = indexWith((idx) => {
       // Hash index under a different company — candidate company won't match.
       idx.postingsByCompanyHash.set(
-        companyHashKey("otherco", "lonely-hash"),
+        companyHashKey("otherco", "4444444444444444"),
         [existing],
       );
     });
@@ -464,9 +464,9 @@ describe("discovery preflight identity resolution", () => {
           client_candidate_id: "hash-only",
           company: "Brand New Co",
           title: "Platform Engineer",
-          url: "https://example.com/brand-new-hash",
+          url: "https://example.com/brand-2222222222222222",
           source: "linkedin",
-          description_hash: "lonely-hash",
+          description_hash: "4444444444444444",
         }),
       ],
       index,
@@ -483,7 +483,7 @@ describe("discovery preflight identity resolution", () => {
       source: "ashby",
       url: "https://example.com/jobs/overlay",
       normalized_url: "https://example.com/jobs/overlay",
-      description_hash: "old",
+      description_hash: "7777777777777777",
     });
     const index = indexWith((idx) => {
       idx.postingsByNormalizedUrl.set("https://example.com/jobs/overlay", existing);
@@ -504,7 +504,7 @@ describe("discovery preflight identity resolution", () => {
           title: "Engineer",
           url: "https://example.com/jobs/overlay",
           source: "ashby",
-          description_hash: "new",
+          description_hash: "8888888888888888",
         }),
       ],
       index,

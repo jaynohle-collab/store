@@ -15,6 +15,7 @@ import { registerLifecycleTools } from "./lifecycle_tools";
 import { registerEvaluationTools } from "./evaluation_tools";
 import { registerInboxTools } from "./inbox_tools";
 import { registerRotationTools } from "./rotation_tools";
+import { registerDiscoveryGptEvaluationTools } from "./discovery_gpt_evaluation_tools";
 
 const PERSISTENCE_NOTE =
   " Persistence layer only — does not score, rank, detect duplicates, or decide whether a job should be saved.";
@@ -42,6 +43,7 @@ export function registerJobTools(server: McpServer): void {
   registerEvaluationTools(server);
   registerInboxTools(server);
   registerRotationTools(server);
+  registerDiscoveryGptEvaluationTools(server);
 
   server.registerTool(
     "save_job",

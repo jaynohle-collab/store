@@ -1,10 +1,18 @@
 import Link from "next/link";
 
-import { formatMatch } from "@/lib/dashboard/display";
+import {
+  GPT_FIT_LABEL,
+  GPT_FIT_TOOLTIP,
+  PYTHON_RANK_LABEL,
+  PYTHON_RANK_TOOLTIP,
+  formatGptFit,
+  formatPythonRank,
+  gptFitTitle,
+} from "@/lib/dashboard/scores";
 
 import { MarkAppliedButton, IgnoreButton } from "./Actions";
 
-export { formatMatch } from "@/lib/dashboard/display";
+export { formatPythonRank as formatMatch } from "@/lib/dashboard/scores";
 
 export function Badge({ kind, children }: { kind: string; children: React.ReactNode }) {
   return <span className={`badge badge-${kind}`}>{children}</span>;
@@ -52,7 +60,8 @@ export function JobTable({
             <th>Company</th>
             <th>Title</th>
             <th>Location</th>
-            <th>Match</th>
+            <th title={PYTHON_RANK_TOOLTIP}>{PYTHON_RANK_LABEL}</th>
+            <th title={GPT_FIT_TOOLTIP}>{GPT_FIT_LABEL}</th>
             <th>Lifecycle</th>
             <th>Posted</th>
             <th>First seen</th>
@@ -78,7 +87,15 @@ export function JobTable({
                   ) : null}
                 </td>
                 <td>{String(job.posting_location || job.canonical_location || "—")}</td>
-                <td>{formatMatch(job.match_score)}</td>
+                <td>{formatPythonRank(job.match_score)}</td>
+                <td title={gptFitTitle(job.gpt_evaluation_version)} aria-label={`${GPT_FIT_LABEL}: ${formatGptFit(job.gpt_relevance_score)} (${job.gpt_evaluation_version ? String(job.gpt_evaluation_version) : "no evidence"})`}>
+                  {formatGptFit(job.gpt_relevance_score)}
+                  {job.gpt_evaluation_version ? (
+                    <span className="muted" style={{ display: "block", fontSize: "0.72rem" }}>
+                      {String(job.gpt_evaluation_version)}
+                    </span>
+                  ) : null}
+                </td>
                 <td>
                   <JobBadges {...job} />
                 </td>

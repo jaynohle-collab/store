@@ -20,6 +20,7 @@ export type ToApplyCandidate = {
   posting_status?: string | null;
   recommendation?: string | null;
   application_id?: string | null;
+  application_status?: string | null;
   match_score?: number | null;
 };
 
@@ -30,7 +31,8 @@ export function isToApplyEligible(job: ToApplyCandidate): boolean {
     return false;
   }
   if (job.application_id != null && String(job.application_id) !== "") {
-    return false;
+    const appStatus = String(job.application_status ?? "").toLowerCase();
+    if (appStatus !== "planned") return false;
   }
   const recommendation = String(job.recommendation ?? "");
   return (TO_APPLY_RECOMMENDATIONS as readonly string[]).includes(recommendation);

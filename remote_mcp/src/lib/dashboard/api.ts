@@ -5,7 +5,7 @@ import {
   dashboardAuthErrorResponse,
   requireDashboardApiUser,
 } from "@/lib/dashboard/auth";
-import { ConflictError } from "@/lib/db/dashboard";
+import { ConflictError, UndoAppliedError } from "@/lib/db/dashboard";
 
 export function zodBadRequest(error: ZodError): NextResponse {
   return NextResponse.json(
@@ -40,6 +40,9 @@ export async function withDashboardApi(
     const auth = dashboardAuthErrorResponse(error);
     if (auth) return auth;
     if (error instanceof ConflictError) {
+      return NextResponse.json({ ok: false, error: error.message }, { status: 409 });
+    }
+    if (error instanceof UndoAppliedError) {
       return NextResponse.json({ ok: false, error: error.message }, { status: 409 });
     }
     const message = error instanceof Error ? error.message : "Request failed";

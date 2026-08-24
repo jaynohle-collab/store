@@ -72,6 +72,54 @@ export function IgnoreButton({ postingId }: { postingId: string }) {
   );
 }
 
+export function UndoAppliedButton({ applicationId }: { applicationId: string }) {
+  const router = useRouter();
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [isError, setIsError] = useState(false);
+
+  async function onClick() {
+    if (busy) return;
+    const confirmed = window.confirm(
+      "Undo Mark Applied for this posting? This returns it to To Apply when still eligible. Application history is preserved.",
+    );
+    if (!confirmed) return;
+
+    setBusy(true);
+    setMessage(null);
+    setIsError(false);
+    try {
+      const res = await fetch(`/api/applications/${applicationId}/undo`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setIsError(true);
+        setMessage(typeof body.error === "string" ? body.error : "Failed to undo applied status");
+        return;
+      }
+      setMessage("Application undone. Refreshing…");
+      router.refresh();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="undo-action">
+      <button type="button" className="btn btn-ghost" disabled={busy} onClick={onClick}>
+        {busy ? "Undoing…" : "Undo Applied"}
+      </button>
+      {message ? (
+        <span className={isError ? "form-message form-message-error" : "form-message"} role="status">
+          {message}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
 export function StatusUpdateForm({
   applicationId,
   currentStatus,

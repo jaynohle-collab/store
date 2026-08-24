@@ -4,6 +4,27 @@ import path from "node:path";
 
 const applications: Record<string, unknown>[] = [];
 const events: Record<string, unknown>[] = [];
+const evaluations: Record<string, unknown>[] = [];
+const postings: Record<string, unknown>[] = [
+  {
+    id: "11111111-1111-4111-8111-111111111111",
+    canonical_job_id: "canonical-1",
+    url: "https://example.com/job",
+    posting_status: "active",
+  },
+  {
+    id: "22222222-2222-4222-8222-222222222222",
+    canonical_job_id: "canonical-2",
+    url: "https://example.com/job2",
+    posting_status: "active",
+  },
+  {
+    id: "33333333-3333-4333-8333-333333333333",
+    canonical_job_id: "canonical-3",
+    url: "https://example.com/job3",
+    posting_status: "closed",
+  },
+];
 let failEventInsert = false;
 
 function stringsOf(strings: TemplateStringsArray): string {
@@ -15,13 +36,81 @@ const sqlMock = Object.assign(
     const text = stringsOf(strings);
 
     if (text.includes("FROM job_postings") && text.includes("LIMIT 1") && !text.includes("WITH")) {
+      const postingId = values[0];
+      const posting = postings.find((p) => p.id === postingId);
+      return posting ? [posting] : [];
+    }
+
+    if (text.includes("FROM applications a") && text.includes("JOIN job_postings p") && text.includes("LATERAL") && text.includes("SELECT a.id, a.status")) {
+      const appId = values[values.length - 1];
+      const app = applications.find((a) => a.id === appId);
+      if (!app) return [];
+      const posting = postings.find((p) => p.id === app.posting_id);
+      const evalRow = evaluations.find((e) => e.posting_id === app.posting_id);
       return [
         {
-          id: values[0],
-          canonical_job_id: "canonical-1",
-          url: "https://example.com/job",
+          id: app.id,
+          status: app.status,
+          posting_status: posting?.posting_status ?? "active",
+          recommendation: evalRow?.recommendation ?? "save",
         },
       ];
+    }
+
+    if (text.includes("WITH updated_app")) {
+      if (text.includes("'undo_applied'")) {
+        const appId = values.find(
+          (v) => typeof v === "string" && applications.some((a) => a.id === v),
+        ) as string | undefined;
+        if (!appId) return [];
+        const idx = applications.findIndex((a) => a.id === appId && a.status === "applied");
+        if (idx < 0) return [];
+        if (failEventInsert) throw new Error("forced event insert failure");
+        const posting = postings.find((p) => p.id === applications[idx].posting_id);
+        const evalRow = evaluations.find((e) => e.posting_id === applications[idx].posting_id);
+        const postingClosed = posting?.posting_status === "closed";
+        const recommendation = evalRow?.recommendation ?? "save";
+        if (postingClosed || !["save", "save_repost"].includes(String(recommendation))) {
+          return [];
+        }
+        applications[idx] = {
+          ...applications[idx],
+          status: "planned",
+          applied_at: null,
+        };
+        const event = {
+          id: `evt-${events.length + 1}`,
+          application_id: appId,
+          event_type: "undo_applied",
+          metadata: { previous_status: "applied" },
+        };
+        events.push(event);
+        return [{ application: applications[idx], event }];
+      }
+      const status = values[0];
+      const notes = values[1];
+      const appId = values[2];
+      if (failEventInsert) {
+        throw new Error("forced event insert failure");
+      }
+      const idx = applications.findIndex((a) => a.id === appId);
+      if (idx < 0) return [];
+      applications[idx] = {
+        ...applications[idx],
+        status,
+        notes: notes ?? applications[idx].notes,
+        updated_at: new Date().toISOString(),
+      };
+      const event = {
+        id: `evt-${events.length + 1}`,
+        application_id: appId,
+        event_type: status,
+        event_at: new Date().toISOString(),
+        notes,
+        metadata: {},
+      };
+      events.push(event);
+      return [{ application: applications[idx], event }];
     }
 
     if (text.includes("FROM applications WHERE posting_id") && text.includes("LIMIT 1")) {
@@ -60,33 +149,6 @@ const sqlMock = Object.assign(
       return [{ application: app, event }];
     }
 
-    if (text.includes("WITH updated_app")) {
-      const status = values[0];
-      const notes = values[1];
-      const appId = values[2];
-      if (failEventInsert) {
-        throw new Error("forced event insert failure");
-      }
-      const idx = applications.findIndex((a) => a.id === appId);
-      if (idx < 0) return [];
-      applications[idx] = {
-        ...applications[idx],
-        status,
-        notes: notes ?? applications[idx].notes,
-        updated_at: new Date().toISOString(),
-      };
-      const event = {
-        id: `evt-${events.length + 1}`,
-        application_id: appId,
-        event_type: status,
-        event_at: new Date().toISOString(),
-        notes,
-        metadata: {},
-      };
-      events.push(event);
-      return [{ application: applications[idx], event }];
-    }
-
     return [];
   },
   {
@@ -101,7 +163,7 @@ vi.mock("@/lib/db/client", () => ({
   resetSqlClient: () => undefined,
 }));
 
-import { ConflictError, markApplied, updateApplicationWithEvent } from "@/lib/db/dashboard";
+import { ConflictError, UndoAppliedError, markApplied, undoApplied, updateApplicationWithEvent } from "@/lib/db/dashboard";
 
 describe("atomic application writes", () => {
   beforeEach(() => {
@@ -165,6 +227,88 @@ describe("atomic application writes", () => {
     ).rejects.toThrow(/forced event insert failure/);
     expect(applications[0].status).toBe("applied");
     expect(events).toHaveLength(1);
+  });
+});
+
+describe("undo applied", () => {
+  beforeEach(() => {
+    applications.length = 0;
+    events.length = 0;
+    evaluations.length = 0;
+    failEventInsert = false;
+  });
+
+  it("reverts applied status to planned and retains audit events", async () => {
+    const created = await markApplied({ postingId: "11111111-1111-4111-8111-111111111111" });
+    const undone = await undoApplied(String(created.application.id));
+    expect(undone.application.status).toBe("planned");
+    expect(undone.event.event_type).toBe("undo_applied");
+    expect(events.some((e) => e.event_type === "applied")).toBe(true);
+    expect(events.some((e) => e.event_type === "undo_applied")).toBe(true);
+    expect(events).toHaveLength(2);
+  });
+
+  it("rejects repeated undo", async () => {
+    const created = await markApplied({ postingId: "11111111-1111-4111-8111-111111111111" });
+    await undoApplied(String(created.application.id));
+    await expect(undoApplied(String(created.application.id))).rejects.toBeInstanceOf(
+      UndoAppliedError,
+    );
+  });
+
+  it("rejects undo for non-applied statuses", async () => {
+    const created = await markApplied({ postingId: "22222222-2222-4222-8222-222222222222" });
+    await updateApplicationWithEvent({
+      applicationId: String(created.application.id),
+      status: "interview",
+    });
+    await expect(undoApplied(String(created.application.id))).rejects.toBeInstanceOf(
+      UndoAppliedError,
+    );
+  });
+
+  it("rejects undo when posting is no longer To Apply eligible", async () => {
+    evaluations.push({
+      posting_id: "33333333-3333-4333-8333-333333333333",
+      recommendation: "discard",
+      match_score: 10,
+    });
+    const created = await markApplied({ postingId: "33333333-3333-4333-8333-333333333333" });
+    await expect(undoApplied(String(created.application.id))).rejects.toBeInstanceOf(
+      UndoAppliedError,
+    );
+  });
+
+  it("rejects unknown application ids", async () => {
+    await expect(
+      undoApplied("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+    ).rejects.toBeInstanceOf(UndoAppliedError);
+  });
+
+  it("handles two simultaneous undo attempts with one success and one conflict", async () => {
+    const created = await markApplied({ postingId: "11111111-1111-4111-8111-111111111111" });
+    const appId = String(created.application.id);
+    const results = await Promise.allSettled([undoApplied(appId), undoApplied(appId)]);
+    const fulfilled = results.filter((r) => r.status === "fulfilled");
+    const rejected = results.filter((r) => r.status === "rejected");
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(rejected[0].status === "rejected" && rejected[0].reason).toBeInstanceOf(
+      UndoAppliedError,
+    );
+    expect(applications[0].status).toBe("planned");
+    expect(events.filter((e) => e.event_type === "undo_applied")).toHaveLength(1);
+  });
+
+  it("does not mutate timestamps or add events on repeated undo after success", async () => {
+    const created = await markApplied({ postingId: "11111111-1111-4111-8111-111111111111" });
+    const appId = String(created.application.id);
+    await undoApplied(appId);
+    const updatedAt = applications[0].updated_at;
+    const eventCount = events.length;
+    await expect(undoApplied(appId)).rejects.toBeInstanceOf(UndoAppliedError);
+    expect(applications[0].updated_at).toBe(updatedAt);
+    expect(events).toHaveLength(eventCount);
   });
 });
 

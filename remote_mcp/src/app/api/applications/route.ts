@@ -10,7 +10,11 @@ export const dynamic = "force-dynamic";
 const applicationsQuerySchema = paginationSchema.extend({
   status: z.string().max(64).optional(),
   interviewing: z.enum(["0", "1"]).optional(),
+  applied_only: z.enum(["0", "1"]).optional(),
   q: z.string().max(512).optional(),
+  sort: z.enum(["applied", "company", "title", "status"]).default("applied"),
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().refine((n) => [25, 50, 100].includes(n)).default(25),
 });
 
 export async function GET(req: Request) {
@@ -22,9 +26,11 @@ export async function GET(req: Request) {
     const page = await listApplicationsPage({
       status: parsed.data.status,
       interviewing: parsed.data.interviewing === "1",
+      appliedOnly: parsed.data.applied_only !== "0",
       q: parsed.data.q,
-      limit: parsed.data.limit,
-      offset: parsed.data.offset,
+      sort: parsed.data.sort,
+      page: parsed.data.page,
+      pageSize: parsed.data.pageSize,
     });
     return NextResponse.json({ ok: true, ...page });
   });

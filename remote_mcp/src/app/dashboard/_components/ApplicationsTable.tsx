@@ -1,8 +1,15 @@
 import Link from "next/link";
 
+import { UndoAppliedButton } from "./Actions";
 import { formatDate } from "./JobTable";
 
-export function ApplicationsTable({ apps }: { apps: Record<string, unknown>[] }) {
+export function ApplicationsTable({
+  apps,
+  showUndo = false,
+}: {
+  apps: Record<string, unknown>[];
+  showUndo?: boolean;
+}) {
   if (!apps.length) return <div className="empty">No applications yet.</div>;
   return (
     <div className="table-wrap">
@@ -15,6 +22,7 @@ export function ApplicationsTable({ apps }: { apps: Record<string, unknown>[] })
             <th>Applied</th>
             <th>Application URL</th>
             <th>Posting URL</th>
+            {showUndo ? <th>Actions</th> : null}
           </tr>
         </thead>
         <tbody>
@@ -44,6 +52,15 @@ export function ApplicationsTable({ apps }: { apps: Record<string, unknown>[] })
                   "—"
                 )}
               </td>
+              {showUndo ? (
+                <td>
+                  {String(a.status) === "applied" ? (
+                    <UndoAppliedButton applicationId={String(a.id)} />
+                  ) : (
+                    <span className="muted">—</span>
+                  )}
+                </td>
+              ) : null}
             </tr>
           ))}
         </tbody>

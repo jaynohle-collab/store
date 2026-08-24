@@ -63,3 +63,9 @@ export function getActiveScoringVersion(): string {
 export function getActiveProfileVersion(): string {
   return process.env.DASHBOARD_PROFILE_VERSION?.trim() || "jay-ai-v1";
 }
+
+/** Prefer pinned GPT evaluation version for dashboard GPT Fit column when set. */
+export function getPreferredGptEvaluationVersion(): string | null {
+  const raw = process.env.DISCOVERY_REQUIRED_EVALUATION_VERSION?.trim();
+  return raw || null;
+}

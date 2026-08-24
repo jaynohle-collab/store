@@ -139,6 +139,7 @@ describe("To Apply SQL / copy policy", () => {
   it("uses save/save_repost for to-apply and keeps threshold only for high match / optional min_match", () => {
     expect(TO_APPLY_RECOMMENDATIONS).toEqual(["save", "save_repost"]);
     expect(dashboardSqlSource).toContain("le.recommendation IN ('save', 'save_repost')");
+    expect(dashboardSqlSource).toContain("pa.application_status = 'planned'");
     expect(dashboardSqlSource).not.toMatch(
       /toApply[\s\S]{0,200}le\.match_score IS NOT NULL AND le\.match_score >= \$\{p\.threshold\}/,
     );
@@ -151,5 +152,6 @@ describe("To Apply SQL / copy policy", () => {
   it("does not claim To Apply requires the high-match threshold", () => {
     expect(toApplyPageSource).not.toMatch(/at\/above threshold/i);
     expect(toApplyPageSource).toMatch(/save or save_repost/i);
+    expect(toApplyPageSource).toContain("listToApplyJobs");
   });
 });

@@ -6,6 +6,18 @@ import {
   INTERVIEW_STATUSES,
 } from "../dashboard/constants";
 import {
+  buildPaginationMeta,
+  clampPage,
+  normalizeDashboardSearch,
+  offsetForPage,
+  parseAppliedSort,
+  parsePage,
+  parsePageSize,
+  searchPattern,
+  totalPages,
+  type AppliedSort,
+} from "../dashboard/query_params";
+import {
   getActiveProfileVersion,
   getActiveScoringVersion,
   getLocalDayBounds,
@@ -23,6 +35,13 @@ export class ConflictError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "ConflictError";
+  }
+}
+
+export class UndoAppliedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UndoAppliedError";
   }
 }
 
@@ -198,7 +217,7 @@ export async function listDashboardJobs(filters: JobListFilters = {}): Promise<J
           ${p.toApply}::boolean IS NOT TRUE OR (
             NOT (LOWER(COALESCE(p.posting_status, 'active')) = ANY(${p.closed}))
             AND le.recommendation IN ('save', 'save_repost')
-            AND pa.application_id IS NULL
+            AND (pa.application_id IS NULL OR pa.application_status = 'planned')
           )
         )
         AND (${p.minMatch}::numeric IS NULL OR (
@@ -274,7 +293,7 @@ export async function listDashboardJobs(filters: JobListFilters = {}): Promise<J
           ${p.toApply}::boolean IS NOT TRUE OR (
             NOT (LOWER(COALESCE(p.posting_status, 'active')) = ANY(${p.closed}))
             AND le.recommendation IN ('save', 'save_repost')
-            AND pa.application_id IS NULL
+            AND (pa.application_id IS NULL OR pa.application_status = 'planned')
           )
         )
         AND (${p.minMatch}::numeric IS NULL OR (
@@ -350,7 +369,7 @@ export async function listDashboardJobs(filters: JobListFilters = {}): Promise<J
           ${p.toApply}::boolean IS NOT TRUE OR (
             NOT (LOWER(COALESCE(p.posting_status, 'active')) = ANY(${p.closed}))
             AND le.recommendation IN ('save', 'save_repost')
-            AND pa.application_id IS NULL
+            AND (pa.application_id IS NULL OR pa.application_status = 'planned')
           )
         )
         AND (${p.minMatch}::numeric IS NULL OR (
@@ -426,7 +445,7 @@ export async function listDashboardJobs(filters: JobListFilters = {}): Promise<J
           ${p.toApply}::boolean IS NOT TRUE OR (
             NOT (LOWER(COALESCE(p.posting_status, 'active')) = ANY(${p.closed}))
             AND le.recommendation IN ('save', 'save_repost')
-            AND pa.application_id IS NULL
+            AND (pa.application_id IS NULL OR pa.application_status = 'planned')
           )
         )
         AND (${p.minMatch}::numeric IS NULL OR (
@@ -556,7 +575,7 @@ export async function getDashboardSummary(
         LEFT JOIN posting_app pa ON pa.posting_id = p.id
         WHERE NOT (LOWER(COALESCE(p.posting_status, 'active')) = ANY(${closed}))
           AND le.recommendation IN ('save', 'save_repost')
-          AND pa.posting_id IS NULL
+          AND (pa.application_id IS NULL OR pa.application_status = 'planned')
       ) AS to_apply,
       (SELECT COUNT(*)::int FROM applications
         WHERE status = ANY(${appliedLater})) AS applied,
@@ -584,17 +603,53 @@ export async function getDashboardSummary(
 export async function listApplicationsPage(params: {
   status?: string;
   interviewing?: boolean;
+  appliedOnly?: boolean;
   q?: string;
+  sort?: AppliedSort | string;
+  page?: number | string;
+  pageSize?: number | string;
   limit?: number;
   offset?: number;
-}): Promise<{ applications: Record<string, unknown>[]; nextOffset: number | null }> {
+}): Promise<{
+  applications: Record<string, unknown>[];
+  pagination: ReturnType<typeof buildPaginationMeta>;
+  nextOffset: number | null;
+}> {
   const sql = getSql();
-  const limit = Math.min(params.limit ?? 50, 100);
-  const offset = params.offset ?? 0;
-  const interview = INTERVIEW_STATUSES as unknown as string[];
-  const q = params.q?.trim() ? `%${params.q.trim()}%` : null;
+  const pageSize = parsePageSize(params.pageSize ?? params.limit);
+  const requestedPage = parsePage(
+    params.page ?? (params.offset != null ? Math.floor(params.offset / pageSize) + 1 : 1),
+  );
+  const q = searchPattern(normalizeDashboardSearch(params.q));
   const status = params.status?.trim() || null;
   const interviewing = params.interviewing === true;
+  const appliedOnly = params.appliedOnly !== false;
+  const sort = parseAppliedSort(typeof params.sort === "string" ? params.sort : undefined);
+  const interview = INTERVIEW_STATUSES as unknown as string[];
+  const appliedLater = APPLIED_OR_LATER_STATUSES as unknown as string[];
+
+  const countRows = await sql`
+    SELECT COUNT(*)::int AS total
+    FROM applications a
+    JOIN canonical_jobs c ON c.id = a.canonical_job_id
+    JOIN job_postings p ON p.id = a.posting_id
+    WHERE
+      (${status}::text IS NULL OR a.status = ${status})
+      AND (${interviewing}::boolean IS NOT TRUE OR a.status = ANY(${interview}))
+      AND (${appliedOnly}::boolean IS NOT TRUE OR a.status = ANY(${appliedLater}))
+      AND (${q}::text IS NULL OR (
+        c.company ILIKE ${q} ESCAPE '\\'
+        OR c.title ILIKE ${q} ESCAPE '\\'
+        OR a.status ILIKE ${q} ESCAPE '\\'
+        OR COALESCE(a.application_url, '') ILIKE ${q} ESCAPE '\\'
+        OR COALESCE(p.url, '') ILIKE ${q} ESCAPE '\\'
+      ))
+  `;
+  const total = Number((countRows[0] as { total?: number })?.total ?? 0);
+  const pages = totalPages(total, pageSize);
+  const page = clampPage(requestedPage, pages || 1);
+  const offset = params.offset ?? offsetForPage(page, pageSize);
+  const fetchLimit = pageSize + 1;
 
   const rows = await sql`
     SELECT
@@ -603,27 +658,39 @@ export async function listApplicationsPage(params: {
       c.title,
       p.url AS posting_url,
       p.is_repost,
-      p.source
+      p.source,
+      p.id AS posting_id
     FROM applications a
     JOIN canonical_jobs c ON c.id = a.canonical_job_id
     JOIN job_postings p ON p.id = a.posting_id
     WHERE
       (${status}::text IS NULL OR a.status = ${status})
       AND (${interviewing}::boolean IS NOT TRUE OR a.status = ANY(${interview}))
+      AND (${appliedOnly}::boolean IS NOT TRUE OR a.status = ANY(${appliedLater}))
       AND (${q}::text IS NULL OR (
-        c.company ILIKE ${q}
-        OR c.title ILIKE ${q}
-        OR COALESCE(a.application_url, '') ILIKE ${q}
-        OR COALESCE(p.url, '') ILIKE ${q}
+        c.company ILIKE ${q} ESCAPE '\\'
+        OR c.title ILIKE ${q} ESCAPE '\\'
+        OR a.status ILIKE ${q} ESCAPE '\\'
+        OR COALESCE(a.application_url, '') ILIKE ${q} ESCAPE '\\'
+        OR COALESCE(p.url, '') ILIKE ${q} ESCAPE '\\'
       ))
-    ORDER BY COALESCE(a.applied_at, a.created_at) DESC, a.id DESC
-    LIMIT ${limit + 1}
+    ORDER BY
+      CASE WHEN ${sort} = 'company' THEN c.company END ASC NULLS LAST,
+      CASE WHEN ${sort} = 'title' THEN c.title END ASC NULLS LAST,
+      CASE WHEN ${sort} = 'status' THEN a.status END ASC NULLS LAST,
+      CASE WHEN ${sort} = 'applied' THEN COALESCE(a.applied_at, a.created_at) END DESC NULLS LAST,
+      a.id ASC
+    LIMIT ${fetchLimit}
     OFFSET ${offset}
   `;
   const mapped = rows.map((row) => mapRow(row as Record<string, unknown>));
-  const hasMore = mapped.length > limit;
-  const applications = mapped.slice(0, limit);
-  return { applications, nextOffset: hasMore ? offset + applications.length : null };
+  const applications = mapped.slice(0, pageSize);
+  const hasMore = mapped.length > pageSize;
+  return {
+    applications,
+    pagination: buildPaginationMeta(total, page, pageSize),
+    nextOffset: hasMore ? offset + applications.length : null,
+  };
 }
 
 export async function getApplicationDetail(
@@ -792,6 +859,103 @@ export async function ignorePosting(postingId: string): Promise<Record<string, u
     RETURNING *
   `;
   return rows.length ? mapRow(rows[0] as Record<string, unknown>) : null;
+}
+
+/**
+ * Undo an accidental Mark Applied: revert to planned, append undo_applied event, keep history.
+ * Single atomic statement — eligibility and status guard run in the UPDATE WHERE clause.
+ */
+export async function undoApplied(applicationId: string): Promise<{
+  application: Record<string, unknown>;
+  event: Record<string, unknown>;
+}> {
+  const sql = getSql();
+  const scoringVersion = getActiveScoringVersion();
+  const profileVersion = getActiveProfileVersion();
+  const closed = CLOSED_POSTING_STATUSES as unknown as string[];
+
+  const rows = await sql`
+    WITH updated_app AS (
+      UPDATE applications a
+      SET status = 'planned',
+          applied_at = NULL,
+          updated_at = NOW()
+      FROM job_postings p
+      LEFT JOIN LATERAL (
+        SELECT recommendation
+        FROM job_evaluations
+        WHERE posting_id = a.posting_id
+          AND scoring_version = ${scoringVersion}
+          AND profile_version = ${profileVersion}
+        ORDER BY evaluated_at DESC, created_at DESC
+        LIMIT 1
+      ) le ON TRUE
+      WHERE a.id = ${applicationId}::uuid
+        AND a.status = 'applied'
+        AND p.id = a.posting_id
+        AND NOT (LOWER(COALESCE(p.posting_status, 'active')) = ANY(${closed}))
+        AND le.recommendation IN ('save', 'save_repost')
+      RETURNING a.*
+    ),
+    inserted_event AS (
+      INSERT INTO application_events (
+        application_id, event_type, event_at, notes, metadata
+      )
+      SELECT
+        id,
+        'undo_applied',
+        NOW(),
+        'Undid accidental Mark Applied from dashboard',
+        jsonb_build_object('previous_status', 'applied')
+      FROM updated_app
+      RETURNING *
+    )
+    SELECT
+      to_jsonb(updated_app.*) AS application,
+      to_jsonb(inserted_event.*) AS event
+    FROM updated_app, inserted_event
+  `;
+
+  if (rows.length) {
+    const result = rows[0] as { application: Record<string, unknown>; event: Record<string, unknown> };
+    return {
+      application: mapRow(result.application),
+      event: mapRow(result.event),
+    };
+  }
+
+  const existing = await sql`
+    SELECT a.id, a.status, p.posting_status, le.recommendation
+    FROM applications a
+    JOIN job_postings p ON p.id = a.posting_id
+    LEFT JOIN LATERAL (
+      SELECT recommendation
+      FROM job_evaluations
+      WHERE posting_id = a.posting_id
+        AND scoring_version = ${scoringVersion}
+        AND profile_version = ${profileVersion}
+      ORDER BY evaluated_at DESC, created_at DESC
+      LIMIT 1
+    ) le ON TRUE
+    WHERE a.id = ${applicationId}::uuid
+    LIMIT 1
+  `;
+
+  if (!existing.length) {
+    throw new UndoAppliedError(`application ${applicationId} not found`);
+  }
+
+  const row = existing[0] as Record<string, unknown>;
+  const status = String(row.status ?? "");
+  if (status !== "applied") {
+    throw new UndoAppliedError(
+      `undo is only allowed for applied status (got ${status || "unknown"})`,
+    );
+  }
+
+  throw new UndoAppliedError(
+    "posting is no longer eligible for To Apply after undo (lifecycle or recommendation changed)",
+  );
 }
 
 export async function listDiscoveryRunsPage(limit = 30, offset = 0) {

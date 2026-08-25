@@ -5,6 +5,13 @@ export const SCOPES = {
   READ: "jobs:read",
   WRITE: "jobs:write",
   DELETE: "jobs:delete",
+  /** Dedicated ChatGPT / operator permission for audited batch revert only. */
+  REVERT: "jobs:revert",
+  /**
+   * Worker-only scope for inbox claim/complete/fail, atomic persistence+provenance,
+   * and fail-closed stale recovery. Must NOT be granted to the ChatGPT connector.
+   */
+  WORKER: "jobs:worker",
 } as const;
 
 export type JobScope = (typeof SCOPES)[keyof typeof SCOPES];
@@ -47,19 +54,45 @@ export const TOOL_PERMISSIONS: Record<string, JobScope> = {
   save_job_evaluation: SCOPES.WRITE,
   get_latest_job_evaluation: SCOPES.READ,
   list_job_evaluations: SCOPES.READ,
-  // Raw ChatGPT discovery inbox (no scoring / lifecycle)
+  // Raw ChatGPT discovery inbox — user-facing submit/status only
   submit_discovery_batch: SCOPES.WRITE,
   get_discovery_batch: SCOPES.READ,
   list_pending_discovery_batches: SCOPES.READ,
-  claim_discovery_batch: SCOPES.WRITE,
-  complete_discovery_batch: SCOPES.WRITE,
-  fail_discovery_batch: SCOPES.WRITE,
+  // Worker-only inbox operations (GitHub Actions M2M with jobs:worker)
+  claim_discovery_batch: SCOPES.WORKER,
+  complete_discovery_batch: SCOPES.WORKER,
+  fail_discovery_batch: SCOPES.WORKER,
+  apply_discovery_batch_job_persistence: SCOPES.WORKER,
+  recover_stale_discovery_batch_claims: SCOPES.WORKER,
   // Discovery source rotation / checkpoint (no crawl / score / job persistence)
   get_discovery_rotation: SCOPES.READ,
   claim_next_discovery_source: SCOPES.WRITE,
   complete_discovery_source: SCOPES.WRITE,
   fail_discovery_source: SCOPES.WRITE,
+  // Audited batch revert (ChatGPT / operators — dedicated scope)
+  preview_discovery_batch_revert: SCOPES.READ,
+  revert_discovery_batch: SCOPES.REVERT,
 };
+
+/** Tools ChatGPT connectors should never be granted (worker / delete scopes). */
+export const CHATGPT_FORBIDDEN_SCOPES: JobScope[] = [
+  SCOPES.WORKER,
+  SCOPES.DELETE,
+];
+
+/** Recommended ChatGPT connector scopes after Milestone 4. */
+export const CHATGPT_RECOMMENDED_SCOPES: JobScope[] = [
+  SCOPES.READ,
+  SCOPES.WRITE,
+  SCOPES.REVERT,
+];
+
+/** Recommended GitHub Actions / Python worker M2M scopes. */
+export const WORKER_RECOMMENDED_SCOPES: JobScope[] = [
+  SCOPES.READ,
+  SCOPES.WRITE,
+  SCOPES.WORKER,
+];
 
 export function getAuth0Issuer(): string | undefined {
   const issuer = process.env.AUTH0_ISSUER?.trim();

@@ -33,7 +33,13 @@ function buildMetadata(req: Request) {
     authServerUrls: [issuer],
     resourceUrl: configuredResource || resourceFromRequest,
     additionalMetadata: {
-      scopes_supported: [SCOPES.READ, SCOPES.WRITE, SCOPES.DELETE],
+      scopes_supported: [
+        SCOPES.READ,
+        SCOPES.WRITE,
+        SCOPES.DELETE,
+        SCOPES.REVERT,
+        SCOPES.WORKER,
+      ],
       bearer_methods_supported: ["header"],
       resource_documentation:
         "Jay Job MCP is a persistence boundary for job records. It does not score or deduplicate jobs.",

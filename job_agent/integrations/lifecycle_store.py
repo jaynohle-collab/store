@@ -199,20 +199,70 @@ class RemoteLifecycleStore:
         )
         return list((result or {}).get("batches") or [])
 
-    async def claim_discovery_batch(self, batch_id: str | None = None) -> dict[str, Any] | None:
-        args: dict[str, Any] = {}
+    async def claim_discovery_batch(
+        self,
+        batch_id: str | None = None,
+        *,
+        worker_identity: str = "worker",
+    ) -> dict[str, Any] | None:
+        args: dict[str, Any] = {"worker_identity": worker_identity}
         if batch_id:
             args["id"] = batch_id
         result = await self._call("claim_discovery_batch", args)
         return (result or {}).get("batch")
 
-    async def complete_discovery_batch(self, batch_id: str) -> dict[str, Any] | None:
-        result = await self._call("complete_discovery_batch", {"id": batch_id})
-        return (result or {}).get("batch")
-
-    async def fail_discovery_batch(self, batch_id: str, error: str) -> dict[str, Any] | None:
+    async def complete_discovery_batch(
+        self, batch_id: str, attempt_id: str
+    ) -> dict[str, Any] | None:
         result = await self._call(
-            "fail_discovery_batch",
-            {"id": batch_id, "error": error},
+            "complete_discovery_batch",
+            {"id": batch_id, "attempt_id": attempt_id},
         )
         return (result or {}).get("batch")
+
+    async def fail_discovery_batch(
+        self, batch_id: str, error: str, attempt_id: str
+    ) -> dict[str, Any] | None:
+        result = await self._call(
+            "fail_discovery_batch",
+            {"id": batch_id, "attempt_id": attempt_id, "error": error},
+        )
+        return (result or {}).get("batch")
+
+    async def apply_discovery_batch_job_persistence(
+        self, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        result = await self._call("apply_discovery_batch_job_persistence", payload)
+        return dict(result or {})
+
+    async def recover_stale_discovery_batch_claims(
+        self, limit: int = 20
+    ) -> dict[str, Any]:
+        result = await self._call(
+            "recover_stale_discovery_batch_claims",
+            {"limit": min(limit, 50)},
+        )
+        return dict(result or {})
+
+    async def preview_discovery_batch_revert(self, batch_id: str) -> dict[str, Any]:
+        result = await self._call(
+            "preview_discovery_batch_revert",
+            {"batch_id": batch_id},
+        )
+        return dict((result or {}).get("preview") or result or {})
+
+    async def revert_discovery_batch(
+        self,
+        batch_id: str,
+        preview_hash: str,
+        *,
+        requested_by: str | None = None,
+    ) -> dict[str, Any]:
+        args: dict[str, Any] = {
+            "batch_id": batch_id,
+            "preview_hash": preview_hash,
+        }
+        if requested_by:
+            args["requested_by"] = requested_by
+        result = await self._call("revert_discovery_batch", args)
+        return dict(result or {})

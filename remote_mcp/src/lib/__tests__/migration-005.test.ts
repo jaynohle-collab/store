@@ -36,9 +36,9 @@ describe("005_discovery_inbox.sql contract", () => {
 describe("discovery inbox MCP permissions", () => {
   it("maps submit/claim/complete/fail to write and get/list to read", () => {
     expect(TOOL_PERMISSIONS.submit_discovery_batch).toBe("jobs:write");
-    expect(TOOL_PERMISSIONS.claim_discovery_batch).toBe("jobs:write");
-    expect(TOOL_PERMISSIONS.complete_discovery_batch).toBe("jobs:write");
-    expect(TOOL_PERMISSIONS.fail_discovery_batch).toBe("jobs:write");
+    expect(TOOL_PERMISSIONS.claim_discovery_batch).toBe("jobs:worker");
+    expect(TOOL_PERMISSIONS.complete_discovery_batch).toBe("jobs:worker");
+    expect(TOOL_PERMISSIONS.fail_discovery_batch).toBe("jobs:worker");
     expect(TOOL_PERMISSIONS.get_discovery_batch).toBe("jobs:read");
     expect(TOOL_PERMISSIONS.list_pending_discovery_batches).toBe("jobs:read");
   });

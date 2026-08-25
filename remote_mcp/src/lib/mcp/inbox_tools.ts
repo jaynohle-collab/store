@@ -11,6 +11,7 @@ import {
   submitDiscoveryBatch,
   submitDiscoveryBatchSchema,
 } from "../db/inbox";
+import { enrichBatchStatusVisibility } from "../db/discovery_batch_revert";
 
 const PERSISTENCE_NOTE =
   " Persistence layer only — stores raw ChatGPT discovery JSON for later Python processing. " +
@@ -88,7 +89,12 @@ export function registerInboxTools(server: McpServer): void {
       try {
         assertToolPermission(getAuth(extra), "get_discovery_batch");
         const batch = await getDiscoveryBatch(id);
-        return jsonResult({ ok: true, found: Boolean(batch), batch });
+        const enriched = await enrichBatchStatusVisibility(batch);
+        return jsonResult({
+          ok: true,
+          found: Boolean(batch),
+          batch: enriched,
+        });
       } catch (error) {
         return errorResult(
           error instanceof Error ? error.message : "Failed to get discovery batch",
@@ -130,9 +136,11 @@ export function registerInboxTools(server: McpServer): void {
     {
       title: "Claim Discovery Batch",
       description:
-        "Atomically claim a pending discovery batch (pending → processing)." + PERSISTENCE_NOTE,
+        "Worker-only: atomically claim a pending discovery batch and create a processing attempt. Requires jobs:worker." +
+        PERSISTENCE_NOTE,
       inputSchema: z.object({
         id: z.string().uuid().optional(),
+        worker_identity: z.string().min(1).max(256).optional(),
       }),
       annotations: {
         readOnlyHint: false,
@@ -141,10 +149,12 @@ export function registerInboxTools(server: McpServer): void {
         openWorldHint: false,
       },
     },
-    async ({ id }, extra) => {
+    async ({ id, worker_identity }, extra) => {
       try {
         assertToolPermission(getAuth(extra), "claim_discovery_batch");
-        const batch = await claimDiscoveryBatch(id);
+        const batch = await claimDiscoveryBatch(id, {
+          worker_identity: worker_identity ?? "worker",
+        });
         return jsonResult({ ok: true, claimed: Boolean(batch), batch });
       } catch (error) {
         return errorResult(
@@ -159,9 +169,12 @@ export function registerInboxTools(server: McpServer): void {
     {
       title: "Complete Discovery Batch",
       description:
-        "Mark a processing discovery batch as completed after Python succeeds." +
+        "Worker-only: mark a processing discovery batch completed for the owning attempt_id. Requires jobs:worker." +
         PERSISTENCE_NOTE,
-      inputSchema: z.object({ id: z.string().uuid() }),
+      inputSchema: z.object({
+        id: z.string().uuid(),
+        attempt_id: z.string().uuid(),
+      }),
       annotations: {
         readOnlyHint: false,
         destructiveHint: false,
@@ -169,10 +182,10 @@ export function registerInboxTools(server: McpServer): void {
         openWorldHint: false,
       },
     },
-    async ({ id }, extra) => {
+    async ({ id, attempt_id }, extra) => {
       try {
         assertToolPermission(getAuth(extra), "complete_discovery_batch");
-        const batch = await completeDiscoveryBatch(id);
+        const batch = await completeDiscoveryBatch(id, attempt_id);
         return jsonResult({ ok: true, completed: Boolean(batch), batch });
       } catch (error) {
         return errorResult(
@@ -187,10 +200,11 @@ export function registerInboxTools(server: McpServer): void {
     {
       title: "Fail Discovery Batch",
       description:
-        "Mark a processing discovery batch as failed and store a concise error. Raw payload is retained." +
+        "Worker-only: mark a processing discovery batch failed for the owning attempt_id. Requires jobs:worker. Payload retained." +
         PERSISTENCE_NOTE,
       inputSchema: z.object({
         id: z.string().uuid(),
+        attempt_id: z.string().uuid(),
         error: z.string().min(1).max(4000),
       }),
       annotations: {
@@ -200,10 +214,10 @@ export function registerInboxTools(server: McpServer): void {
         openWorldHint: false,
       },
     },
-    async ({ id, error }, extra) => {
+    async ({ id, attempt_id, error }, extra) => {
       try {
         assertToolPermission(getAuth(extra), "fail_discovery_batch");
-        const batch = await failDiscoveryBatch(id, error);
+        const batch = await failDiscoveryBatch(id, error, attempt_id);
         return jsonResult({ ok: true, failed: Boolean(batch), batch });
       } catch (err) {
         return errorResult(

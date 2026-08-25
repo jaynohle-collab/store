@@ -25,6 +25,9 @@ from job_agent.discovery.openai_discovery import validate_discovery_payload
 from job_agent.examples.daily_job_run import run_daily_job_run
 from job_agent.integrations.lifecycle_store import RemoteLifecycleStore
 from job_agent.integrations.persistence import get_persistence_mode
+from job_agent.lifecycle.atomic_apply import (
+    sanitize_apply_discovery_batch_job_persistence_payload,
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -267,6 +270,9 @@ def process_discovery_inbox(
                         apply_payload["update_posting"] = effect["update_posting"]
                     if effect.get("evaluation"):
                         apply_payload["evaluation"] = effect["evaluation"]
+                    apply_payload = sanitize_apply_discovery_batch_job_persistence_payload(
+                        apply_payload
+                    )
                     asyncio.run(store.apply_discovery_batch_job_persistence(apply_payload))
 
             completed_row = asyncio.run(

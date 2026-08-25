@@ -183,7 +183,31 @@ class DiscoveryInboxStoreTests(unittest.IsolatedAsyncioTestCase):
         second = await store.claim_discovery_batch(submitted["id"])
         self.assertIsNotNone(first)
         self.assertEqual(first["status"], "processing")
+        self.assertIsNotNone(first.get("attempt_id"))
+        self.assertEqual(first["active_attempt_id"], first["attempt_id"])
         self.assertIsNone(second)
+        claimed_attempts = [
+            a for a in store.attempts.values() if a.get("status") == "claimed"
+        ]
+        self.assertEqual(len(claimed_attempts), 1)
+        self.assertEqual(claimed_attempts[0]["id"], first["attempt_id"])
+
+    async def test_oldest_pending_claim_links_attempt_identically(self):
+        store = InMemoryDiscoveryInboxStore()
+        first = await store.submit_discovery_batch({"jobs": [dict(VALID_JOB)]})
+        await store.submit_discovery_batch(
+            {"jobs": [dict(VALID_JOB, url="https://example.com/jobs/2")]}
+        )
+        claimed = await store.claim_discovery_batch(worker_identity="github-actions")
+        self.assertIsNotNone(claimed)
+        self.assertEqual(claimed["id"], first["id"])
+        self.assertEqual(claimed["active_attempt_id"], claimed["attempt_id"])
+        self.assertEqual(claimed["worker_identity"], "github-actions")
+        self.assertFalse(claimed["mutation_started"])
+        # Never leave processing without a linked attempt (production incident shape).
+        row = store.batches[claimed["id"]]
+        self.assertEqual(row["status"], "processing")
+        self.assertIsNotNone(row["active_attempt_id"])
 
     async def test_cannot_claim_completed_batch(self):
         store = InMemoryDiscoveryInboxStore()

@@ -232,7 +232,13 @@ class RemoteLifecycleStore:
     async def apply_discovery_batch_job_persistence(
         self, payload: dict[str, Any]
     ) -> dict[str, Any]:
-        result = await self._call("apply_discovery_batch_job_persistence", payload)
+        from job_agent.lifecycle.atomic_apply import (
+            sanitize_apply_discovery_batch_job_persistence_payload,
+        )
+
+        # Scoped sanitizer for this tool only — other MCP tools may send null.
+        cleaned = sanitize_apply_discovery_batch_job_persistence_payload(payload)
+        result = await self._call("apply_discovery_batch_job_persistence", cleaned)
         return dict(result or {})
 
     async def recover_stale_discovery_batch_claims(

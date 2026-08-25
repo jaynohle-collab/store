@@ -1,0 +1,87 @@
+name: Process Discovery Inbox
+
+# Polls Remote MCP for pending ChatGPT discovery batches and processes them
+# through the existing Python job agent (normalize → lifecycle → profile-v1).
+#
+# Expected delay: up to one schedule interval (default 15 minutes) after
+# submit_discovery_batch, plus processor runtime. Manual workflow_dispatch is
+# available for smoke tests and operator recovery.
+#
+# Scheduled runs require repository variable:
+#   DISCOVERY_INBOX_SCHEDULE_ENABLED=true
+# Manual workflow_dispatch always runs.
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Max pending batches to process this run"
+        required: false
+        default: "5"
+  schedule:
+    # Every 15 minutes — balances dashboard freshness vs free-plan Actions minutes.
+    - cron: "*/15 * * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: process-discovery-inbox
+  cancel-in-progress: false
+
+jobs:
+  process-inbox:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      vars.DISCOVERY_INBOX_SCHEDULE_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      JOB_PERSISTENCE_MODE: remote
+      JOB_MCP_URL: https://jay-job-mcp.vercel.app/api/mcp
+      AUTH0_TOKEN_URL: https://jay-job.us.auth0.com/oauth/token
+      AUTH0_AUDIENCE: https://jay-job-mcp-michaeltchueng-2909s-projects.vercel.app/api/mcp
+      AUTH0_SCOPES: jobs:read jobs:write jobs:worker
+      AUTH0_CLIENT_ID: ${{ secrets.AUTH0_CLIENT_ID }}
+      AUTH0_CLIENT_SECRET: ${{ secrets.AUTH0_CLIENT_SECRET }}
+      DISCOVERY_INBOX_WORKER_IDENTITY: github-actions
+      DISCOVERY_INBOX_BATCH_LIMIT: ${{ github.event.inputs.limit || vars.DISCOVERY_INBOX_BATCH_LIMIT || '5' }}
+      DISCOVERY_INBOX_STALE_PROCESSING_MINUTES: ${{ vars.DISCOVERY_INBOX_STALE_PROCESSING_MINUTES || '60' }}
+      DISCOVERY_INBOX_FAIL_WORKFLOW_ON_BATCH_FAILURE: ${{ vars.DISCOVERY_INBOX_FAIL_WORKFLOW_ON_BATCH_FAILURE || 'true' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify required secrets are present
+        env:
+          AUTH0_CLIENT_ID: ${{ secrets.AUTH0_CLIENT_ID }}
+          AUTH0_CLIENT_SECRET: ${{ secrets.AUTH0_CLIENT_SECRET }}
+        run: |
+          set -euo pipefail
+          missing=0
+          if [ -z "${AUTH0_CLIENT_ID}" ]; then echo "AUTH0_CLIENT_ID is not configured"; missing=1; fi
+          if [ -z "${AUTH0_CLIENT_SECRET}" ]; then echo "AUTH0_CLIENT_SECRET is not configured"; missing=1; fi
+          # Never print secret values.
+          if [ "$missing" -ne 0 ]; then exit 1; fi
+          echo "Required Auth0 M2M secrets are present (values not logged)"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Process pending discovery inbox batches
+        run: |
+          set -euo pipefail
+          LIMIT="${DISCOVERY_INBOX_BATCH_LIMIT}"
+          echo "Processing up to ${LIMIT} pending discovery inbox batch(es)"
+          # Secrets and Neon connection strings are never echoed.
+          python -m job_agent.examples.process_discovery_inbox \
+            --limit "${LIMIT}" \
+            --recover-stale \
+            --fail-on-batch-failure

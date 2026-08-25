@@ -189,7 +189,9 @@ class DiscoveryInboxStoreTests(unittest.IsolatedAsyncioTestCase):
         store = InMemoryDiscoveryInboxStore()
         submitted = await store.submit_discovery_batch({"jobs": [dict(VALID_JOB)]})
         claimed = await store.claim_discovery_batch(submitted["id"])
-        completed = await store.complete_discovery_batch(claimed["id"])
+        completed = await store.complete_discovery_batch(
+            claimed["id"], claimed["attempt_id"]
+        )
         self.assertEqual(completed["status"], "completed")
         self.assertIsNone(await store.claim_discovery_batch(submitted["id"]))
 
@@ -317,6 +319,7 @@ class DiscoveryInboxProcessorTests(unittest.TestCase):
     def test_lifecycle_and_profile_scoring_remain_downstream(self):
         inbox = InMemoryDiscoveryInboxStore()
         lifecycle = InMemoryLifecycleStore()
+        inbox.lifecycle_backend = lifecycle
         __import__("asyncio").run(
             inbox.submit_discovery_batch({"jobs": [dict(VALID_JOB)]})
         )

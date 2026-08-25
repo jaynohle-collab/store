@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { getSql } from "./client";
+import { getSql, getTransactionalSql } from "./client";
 import { getDiscoveryGptEvaluationById } from "./discovery_gpt_evaluations";
 import {
   DEFAULT_GPT_EVALUATION_VERSION,
@@ -30,7 +30,17 @@ export const DISCOVERY_INBOX_STATUSES = [
   "processing",
   "completed",
   "failed",
+  "reverted",
 ] as const;
+
+/** Minutes a claim may stay in processing before bounded stale recovery. */
+export function getDiscoveryInboxStaleProcessingMinutes(): number {
+  const raw = process.env.DISCOVERY_INBOX_STALE_PROCESSING_MINUTES?.trim();
+  if (!raw) return 60;
+  const parsed = Number.parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed < 5) return 60;
+  return Math.min(parsed, 24 * 60);
+}
 
 export type DiscoveryInboxStatus = (typeof DISCOVERY_INBOX_STATUSES)[number];
 
@@ -381,72 +391,296 @@ export async function listPendingDiscoveryBatches(
 
 export async function claimDiscoveryBatch(
   id?: string,
+  options?: { worker_identity?: string },
 ): Promise<DiscoveryInboxBatchRecord | null> {
-  const sql = getSql();
-  if (id) {
-    const rows = await sql`
-      UPDATE discovery_inbox_batches
-      SET
-        status = 'processing',
-        processing_started_at = NOW(),
-        updated_at = NOW()
-      WHERE id = ${id}::uuid
-        AND status = 'pending'
-      RETURNING *
-    `;
-    return rows.length ? mapRow(rows[0] as Record<string, unknown>) : null;
-  }
+  const sql = getTransactionalSql();
+  const workerIdentity = (options?.worker_identity || "worker").trim() || "worker";
 
-  const rows = await sql`
-    UPDATE discovery_inbox_batches
-    SET
-      status = 'processing',
-      processing_started_at = NOW(),
-      updated_at = NOW()
-    WHERE id = (
-      SELECT id FROM discovery_inbox_batches
-      WHERE status = 'pending'
-      ORDER BY submitted_at ASC, created_at ASC
-      FOR UPDATE SKIP LOCKED
-      LIMIT 1
-    )
-    RETURNING *
-  `;
-  return rows.length ? mapRow(rows[0] as Record<string, unknown>) : null;
+  const results = id
+    ? await sql.transaction([
+        sql`
+          WITH claimed AS (
+            UPDATE discovery_inbox_batches
+            SET
+              status = 'processing',
+              processing_started_at = NOW(),
+              updated_at = NOW()
+            WHERE id = ${id}::uuid
+              AND status = 'pending'
+            RETURNING *
+          ),
+          attempt AS (
+            INSERT INTO discovery_batch_processing_attempts (
+              batch_id, status, worker_identity, claimed_at, heartbeat_at, mutation_started
+            )
+            SELECT id, 'claimed', ${workerIdentity}, NOW(), NOW(), FALSE
+            FROM claimed
+            RETURNING *
+          ),
+          linked AS (
+            UPDATE discovery_inbox_batches b
+            SET active_attempt_id = a.id, updated_at = NOW()
+            FROM claimed c, attempt a
+            WHERE b.id = c.id
+            RETURNING b.*, a.id AS attempt_id, a.worker_identity AS attempt_worker, a.mutation_started AS attempt_mutation_started
+          )
+          SELECT * FROM linked
+        `,
+      ])
+    : await sql.transaction([
+        sql`
+          WITH claimed AS (
+            UPDATE discovery_inbox_batches
+            SET
+              status = 'processing',
+              processing_started_at = NOW(),
+              updated_at = NOW()
+            WHERE id = (
+              SELECT id FROM discovery_inbox_batches
+              WHERE status = 'pending'
+              ORDER BY submitted_at ASC, created_at ASC
+              FOR UPDATE SKIP LOCKED
+              LIMIT 1
+            )
+            RETURNING *
+          ),
+          attempt AS (
+            INSERT INTO discovery_batch_processing_attempts (
+              batch_id, status, worker_identity, claimed_at, heartbeat_at, mutation_started
+            )
+            SELECT id, 'claimed', ${workerIdentity}, NOW(), NOW(), FALSE
+            FROM claimed
+            RETURNING *
+          ),
+          linked AS (
+            UPDATE discovery_inbox_batches b
+            SET active_attempt_id = a.id, updated_at = NOW()
+            FROM claimed c, attempt a
+            WHERE b.id = c.id
+            RETURNING b.*, a.id AS attempt_id, a.worker_identity AS attempt_worker, a.mutation_started AS attempt_mutation_started
+          )
+          SELECT * FROM linked
+        `,
+      ]);
+
+  const rows = results[0] ?? [];
+  if (!rows.length) return null;
+  const row = mapRow<DiscoveryInboxBatchRecord>(rows[0] as Record<string, unknown>);
+  return {
+    ...row,
+    attempt_id: String(row.attempt_id),
+    worker_identity: String(row.attempt_worker ?? workerIdentity),
+    mutation_started: Boolean(row.attempt_mutation_started),
+  };
 }
 
 export async function completeDiscoveryBatch(
   id: string,
+  attemptId?: string,
 ): Promise<DiscoveryInboxBatchRecord | null> {
-  const sql = getSql();
-  const rows = await sql`
-    UPDATE discovery_inbox_batches
-    SET
-      status = 'completed',
-      processed_at = NOW(),
-      updated_at = NOW()
-    WHERE id = ${id}::uuid
-      AND status = 'processing'
-    RETURNING *
-  `;
-  return rows.length ? mapRow(rows[0] as Record<string, unknown>) : null;
+  if (!attemptId) {
+    throw new Error("attempt_id_required_for_complete");
+  }
+  const sql = getTransactionalSql();
+  const results = await sql.transaction([
+    sql`
+      UPDATE discovery_inbox_batches
+      SET
+        status = 'completed',
+        processed_at = NOW(),
+        updated_at = NOW(),
+        active_attempt_id = NULL
+      WHERE id = ${id}::uuid
+        AND status = 'processing'
+        AND active_attempt_id = ${attemptId}::uuid
+      RETURNING *
+    `,
+    sql`
+      UPDATE discovery_batch_processing_attempts
+      SET
+        status = 'completed',
+        completed_at = NOW(),
+        heartbeat_at = NOW(),
+        updated_at = NOW()
+      WHERE id = ${attemptId}::uuid
+        AND batch_id = ${id}::uuid
+        AND status = 'claimed'
+      RETURNING id
+    `,
+  ]);
+  const batchRows = results[0] ?? [];
+  if (!batchRows.length || !(results[1] ?? []).length) return null;
+  return mapRow(batchRows[0] as Record<string, unknown>);
 }
 
 export async function failDiscoveryBatch(
   id: string,
   error: string,
+  attemptId?: string,
 ): Promise<DiscoveryInboxBatchRecord | null> {
-  const sql = getSql();
-  const rows = await sql`
-    UPDATE discovery_inbox_batches
-    SET
-      status = 'failed',
-      processed_at = NOW(),
-      error = ${error},
-      updated_at = NOW()
-    WHERE id = ${id}::uuid
-      AND status = 'processing'
-    RETURNING *
+  if (!attemptId) {
+    throw new Error("attempt_id_required_for_fail");
+  }
+  const sql = getTransactionalSql();
+  const results = await sql.transaction([
+    sql`
+      UPDATE discovery_inbox_batches
+      SET
+        status = 'failed',
+        processed_at = NOW(),
+        error = ${error},
+        updated_at = NOW(),
+        active_attempt_id = NULL
+      WHERE id = ${id}::uuid
+        AND status = 'processing'
+        AND active_attempt_id = ${attemptId}::uuid
+      RETURNING *
+    `,
+    sql`
+      UPDATE discovery_batch_processing_attempts
+      SET
+        status = 'failed',
+        sanitized_error = ${error},
+        completed_at = NOW(),
+        heartbeat_at = NOW(),
+        updated_at = NOW()
+      WHERE id = ${attemptId}::uuid
+        AND batch_id = ${id}::uuid
+        AND status = 'claimed'
+      RETURNING id
+    `,
+  ]);
+  const batchRows = results[0] ?? [];
+  if (!batchRows.length || !(results[1] ?? []).length) return null;
+  return mapRow(batchRows[0] as Record<string, unknown>);
+}
+
+/**
+ * Fail-closed stale-claim recovery.
+ *
+ * Never infers "no mutations" from an empty effects table alone.
+ * Requeue is allowed ONLY when the durable attempt proves
+ * ``mutation_started = FALSE`` (set atomically with the first mutation).
+ * Any mutation_started / missing-attempt / effects-present case marks the
+ * batch failed for operator review — never auto-replay.
+ */
+export async function recoverStaleDiscoveryBatchClaims(
+  limit = 20,
+): Promise<{
+  requeued: DiscoveryInboxBatchRecord[];
+  failed: DiscoveryInboxBatchRecord[];
+  abandoned_attempts: string[];
+  stale_after_minutes: number;
+  policy: "fail_closed_unless_mutation_started_false";
+}> {
+  const sql = getTransactionalSql();
+  const minutes = getDiscoveryInboxStaleProcessingMinutes();
+  const candidates = await sql`
+    SELECT
+      b.*,
+      a.id AS attempt_id,
+      a.mutation_started AS attempt_mutation_started,
+      a.status AS attempt_status
+    FROM discovery_inbox_batches b
+    LEFT JOIN discovery_batch_processing_attempts a
+      ON a.id = b.active_attempt_id
+    WHERE b.status = 'processing'
+      AND b.processing_started_at IS NOT NULL
+      AND b.processing_started_at < NOW() - (${minutes}::text || ' minutes')::interval
+    ORDER BY b.processing_started_at ASC
+    LIMIT ${limit}
   `;
-  return rows.length ? mapRow(rows[0] as Record<string, unknown>) : null;
+
+  const requeued: DiscoveryInboxBatchRecord[] = [];
+  const failed: DiscoveryInboxBatchRecord[] = [];
+  const abandonedAttempts: string[] = [];
+
+  for (const raw of candidates) {
+    const row = raw as Record<string, unknown>;
+    const batchId = String(row.id);
+    const attemptId = row.attempt_id == null ? null : String(row.attempt_id);
+    const mutationStarted = row.attempt_mutation_started === true;
+
+    // Proven safe: active attempt exists and never started mutations.
+    if (attemptId && mutationStarted === false) {
+      const results = await sql.transaction([
+        sql`
+          UPDATE discovery_batch_processing_attempts
+          SET
+            status = 'abandoned',
+            sanitized_error = ${`stale_claim_abandoned_after_${minutes}_minutes_no_mutations`},
+            completed_at = NOW(),
+            updated_at = NOW()
+          WHERE id = ${attemptId}::uuid
+            AND status = 'claimed'
+            AND mutation_started = FALSE
+          RETURNING id
+        `,
+        sql`
+          UPDATE discovery_inbox_batches
+          SET
+            status = 'pending',
+            processing_started_at = NULL,
+            active_attempt_id = NULL,
+            error = NULL,
+            updated_at = NOW()
+          WHERE id = ${batchId}::uuid
+            AND status = 'processing'
+            AND active_attempt_id = ${attemptId}::uuid
+          RETURNING *
+        `,
+      ]);
+      if ((results[0] ?? []).length && (results[1] ?? []).length) {
+        abandonedAttempts.push(attemptId);
+        requeued.push(
+          mapRow(results[1][0] as Record<string, unknown>),
+        );
+      }
+      continue;
+    }
+
+    const message =
+      `stale_processing_claim_timeout after ${minutes} minutes ` +
+      `(fail-closed: mutation state uncertain or mutations started; operator review required)`;
+    const statements = [
+      sql`
+        UPDATE discovery_inbox_batches
+        SET
+          status = 'failed',
+          processed_at = NOW(),
+          error = ${message},
+          updated_at = NOW(),
+          active_attempt_id = NULL
+        WHERE id = ${batchId}::uuid
+          AND status = 'processing'
+        RETURNING *
+      `,
+    ];
+    if (attemptId) {
+      statements.push(sql`
+        UPDATE discovery_batch_processing_attempts
+        SET
+          status = 'abandoned',
+          sanitized_error = ${message},
+          completed_at = NOW(),
+          updated_at = NOW()
+        WHERE id = ${attemptId}::uuid
+          AND status = 'claimed'
+        RETURNING id
+      `);
+    }
+    const results = await sql.transaction(statements);
+    if ((results[0] ?? []).length) {
+      failed.push(mapRow(results[0][0] as Record<string, unknown>));
+      if (attemptId) abandonedAttempts.push(attemptId);
+    }
+  }
+
+  return {
+    requeued,
+    failed,
+    abandoned_attempts: abandonedAttempts,
+    stale_after_minutes: minutes,
+    policy: "fail_closed_unless_mutation_started_false",
+  };
 }

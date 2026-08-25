@@ -10,6 +10,7 @@ from job_agent.integrations.lifecycle_store import RemoteLifecycleStore
 from job_agent.integrations.persistence import get_persistence_mode
 from job_agent.integrations.remote_mcp_client import RemoteMcpMemoryAdapter
 from job_agent.lifecycle import CanonicalJobResolver
+from job_agent.lifecycle.url import normalize_url
 from job_agent.lifecycle.evaluation_service import (
     PROFILE_VERSION as DEFAULT_PROFILE_VERSION,
     SCORING_VERSION as DEFAULT_SCORING_VERSION,
@@ -85,6 +86,7 @@ def run_daily_job_run(
     profile_file: Path | None = None,
     scoring: ScoreCalculator | None = None,
     jobs_payload: dict[str, Any] | None = None,
+    defer_lifecycle_persist: bool = False,
 ) -> dict[str, object]:
     """Run the daily GPT job workflow.
 
@@ -107,6 +109,11 @@ def run_daily_job_run(
     jobs_payload:
         Optional in-memory discovery payload ``{\"jobs\": [...]}``. When set,
         ``job_file`` is not read (useful for automated discovery / tests).
+    defer_lifecycle_persist:
+        When True (Milestone 4 remote inbox worker), classify/score only and
+        attach create_*/update_*/evaluation payloads for
+        ``apply_discovery_batch_job_persistence``. Does not write lifecycle rows
+        through the ordinary save_* tools.
     """
     try:
         if jobs_payload is not None:
@@ -167,6 +174,7 @@ def run_daily_job_run(
         memory_store=memory_store,
         lifecycle_resolver=lifecycle_resolver,
         evaluation_service=evaluation_service,
+        defer_lifecycle_persist=defer_lifecycle_persist,
     )
 
     matches = __import__("asyncio").run(workflow.execute())
@@ -199,9 +207,43 @@ def run_daily_job_run(
         "new_jobs": new_jobs,
         "saved": saved,
         "top_matches": top_matches,
+        "job_effects": [
+            {
+                "input_index": index,
+                **(
+                    match.provenance
+                    if isinstance(getattr(match, "provenance", None), dict)
+                    else {}
+                ),
+                "processing_action": (
+                    (match.provenance or {}).get("processing_action")
+                    if isinstance(getattr(match, "provenance", None), dict)
+                    else (
+                        "skipped"
+                        if match.decision.recommendation == "discard"
+                        else "unchanged"
+                    )
+                ),
+                "company": match.posting.company_name,
+                "title": match.posting.title,
+                "normalized_url": _safe_normalized_url(match),
+            }
+            for index, match in enumerate(matches)
+        ],
     }
 
     return report
+
+
+def _safe_normalized_url(match: Any) -> str | None:
+    provenance = getattr(match, "provenance", None)
+    if isinstance(provenance, dict) and provenance.get("normalized_url"):
+        return str(provenance.get("normalized_url"))
+    fingerprint = getattr(match, "fingerprint", None)
+    url = getattr(fingerprint, "url", None) if fingerprint is not None else None
+    if not isinstance(url, str):
+        return None
+    return normalize_url(url)
 
 
 def print_daily_report(report: dict[str, object]) -> None:

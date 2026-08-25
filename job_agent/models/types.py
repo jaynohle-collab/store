@@ -190,3 +190,5 @@ class JobMatch:
     decision: JobDecision
     memory_job_id: int | str | None = None
     saved: bool = False
+    # Optional batch provenance payload for inbox processing (Milestone 4).
+    provenance: dict | None = None

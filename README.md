@@ -282,7 +282,7 @@ Manual `workflow_dispatch` continues to work.
 | `JOB_MCP_URL` | `https://jay-job-mcp.vercel.app/api/mcp` |
 | `AUTH0_TOKEN_URL` | `https://jay-job.us.auth0.com/oauth/token` |
 | `AUTH0_AUDIENCE` | existing API audience `https://jay-job-mcp-michaeltchueng-2909s-projects.vercel.app/api/mcp` |
-| `AUTH0_SCOPES` | `jobs:read jobs:write jobs:delete` |
+| `AUTH0_SCOPES` | Worker: `jobs:read jobs:write jobs:worker` · ChatGPT: `jobs:read jobs:write jobs:revert` |
 
 `AUTH0_AUDIENCE` intentionally preserves the currently configured Auth0 API audience and is **not** rewritten to the public stable MCP hostname.
 
@@ -317,6 +317,7 @@ Schema migrations:
 6. `remote_mcp/migrations/006_discovery_source_rotation.sql` — ordered discovery source rotation / checkpoints
 7. `remote_mcp/migrations/007_discovery_gpt_evaluations.sql` — GPT admission evaluations (`discovery_gpt_evaluations`; separate from Python `job_evaluations`)
 8. `remote_mcp/migrations/008_discovery_gpt_v2_quality_gates.sql` — additive `gpt-fit-v2` columns (`remote_scope`, `direct_posting_url_verified`, `normalization_version`, `posting_status`, `posting_status_verified_at`) plus CHECK constraints for v2 QUALIFIED structural integrity (v1 rows unaffected; idempotent re-run)
+9. `remote_mcp/migrations/009_discovery_batch_provenance_revert.sql` — additive `discovery_batch_effects` + `discovery_batch_revert_events`, extends inbox status CHECK with `reverted` (idempotent; historical batches remain non-revertible without effect rows)
 
 Migration 002 notes:
 
@@ -376,14 +377,30 @@ python -m job_agent.examples.daily_job_run
 
 ### Process ChatGPT discovery inbox
 
+Automatic path (Milestone 4A): GitHub Actions workflow
+`.github/workflows/process-discovery-inbox.yml` polls pending batches every
+**15 minutes** (when `DISCOVERY_INBOX_SCHEDULE_ENABLED=true`) and runs the same
+Python processor below. Expected maximum delay from `submit_discovery_batch` to
+dashboard visibility is **one schedule interval + processor runtime**
+(≈ 15–20 minutes under normal load). Concurrent workflow runs share
+`concurrency.group: process-discovery-inbox` with `cancel-in-progress: false`;
+atomic `FOR UPDATE SKIP LOCKED` claims prevent duplicate processing.
+
+Manual fallback (always available):
+
 ```bash
 # set JOB_PERSISTENCE_MODE=remote and Auth0 env vars
 python -m job_agent.examples.process_discovery_inbox
 python -m job_agent.examples.process_discovery_inbox --limit 10
 python -m job_agent.examples.process_discovery_inbox --batch-id <uuid>
+python -m job_agent.examples.process_discovery_inbox --limit 5 --recover-stale --fail-on-batch-failure
 ```
 
-A failed Python workflow marks the batch `failed`, keeps the raw payload, and stores a concise error. Batches are never deleted by the processor.
+A failed Python workflow marks the batch `failed`, keeps the raw payload, and stores a concise sanitized error. Batches are never deleted by the processor. Failed batches are **not** auto-requeued; re-submit a new batch or recover after operator review. Stale `processing` claims older than `DISCOVERY_INBOX_STALE_PROCESSING_MINUTES` (default 60): requeue to `pending` when no provenance rows exist; mark `failed` when partial provenance exists.
+
+`get_discovery_batch` remains backward compatible and adds
+`automatic_processing_expected`, `automatic_processing_note`, and
+`sanitized_error` visibility fields.
 
 ### Legacy OpenAI API discovery (optional)
 
@@ -401,9 +418,9 @@ python -m job_agent.examples.automated_daily_run
 5. `delete_job` — `id`
 
 6. `submit_discovery_batch` — ChatGPT jobs (`jobs`, `source`, `metadata`). Nested `gpt_evaluation` (when present) must include `evaluation_id`, `gpt_relevance_score`, `gpt_decision=QUALIFIED`, `evaluation_version`, and optional `reasoning_summary`, and must match a stored QUALIFIED evaluation (score >= 70, matching identity/version/hash/remote_scope/URL verification/posting_status). Quality flags: `DISCOVERY_REQUIRED_EVALUATION_VERSION`, `DISCOVERY_REQUIRE_REMOTE_US`, `DISCOVERY_REQUIRE_DIRECT_POSTING_URL`, `DISCOVERY_REQUIRE_DESCRIPTION_HASH` (default off until cutover). Any quality flag implicitly requires stored GPT evidence even if `DISCOVERY_REQUIRE_GPT_EVALUATION` is false. Production already keeps `DISCOVERY_REQUIRE_GPT_EVALUATION=true` — never disable it during v2 rollout. Rejected jobs are not accepted into the inbox.
-7. `get_discovery_batch` — `id`
+7. `get_discovery_batch` — `id` (includes automatic-processing visibility fields; existing fields unchanged)
 8. `list_pending_discovery_batches` — `limit`
-9. `claim_discovery_batch` — optional `id`; pending → processing
+9. `claim_discovery_batch` — optional `id`; pending → processing (worker-owned; ChatGPT must not claim)
 10. `complete_discovery_batch` — `id`; processing → completed
 11. `fail_discovery_batch` — `id`, `error`; processing → failed (payload retained)
 
@@ -431,6 +448,75 @@ Production already has `DISCOVERY_REQUIRE_GPT_EVALUATION=true`. Correct order:
 
 Flag safety: any quality flag being true implicitly requires stored GPT evidence (never silently accept without it).
 
+### Milestone 4 — automatic inbox processing + audited batch revert
+
+#### Automatic processing (4A)
+
+- **Trigger:** scheduled GitHub Actions `process-discovery-inbox` (cron `*/15 * * * *`) + `workflow_dispatch`
+- **Processor:** existing `python -m job_agent.examples.process_discovery_inbox` (no TypeScript copy of ranking/lifecycle)
+- **Auth:** Auth0 M2M client credentials → access token with `jobs:read jobs:write jobs:worker`
+  - Workflow never prints tokens, client secrets, or `DATABASE_URL`
+  - ChatGPT connector must **not** be granted `jobs:worker` (or `jobs:delete`)
+- **Secrets:** reuse `AUTH0_CLIENT_ID` / `AUTH0_CLIENT_SECRET`
+- **Enable schedule:** set repository variable `DISCOVERY_INBOX_SCHEDULE_ENABLED=true`
+  - Scheduled runs only execute from the default branch (GitHub Actions behavior)
+  - Cron delay is typical (~15m), not guaranteed
+  - `workflow_dispatch` always runs (even when the schedule variable is unset/false)
+- **Bound per run:** `DISCOVERY_INBOX_BATCH_LIMIT` (default 5), job `timeout-minutes: 30`
+- **Concurrency:** workflow group `process-discovery-inbox` plus DB attempt ownership (`FOR UPDATE SKIP LOCKED` + one active attempt)
+- **Atomic persist:** remote mode defers ordinary `save_*` writes; each job commits via `apply_discovery_batch_job_persistence` (mutation + provenance + attempt heartbeat in one Neon `sql.transaction`)
+- **Stale recovery:** fail-closed unless durable attempt has `mutation_started=false`; never requeue solely because effects are empty
+- **Failure result:** `--fail-on-batch-failure` makes the workflow fail when any claimed batch fails; poison batches stay `failed` for operator review (no silent infinite loop)
+- **Manual fallback:** same CLI locally or via `workflow_dispatch`
+
+#### Provenance + revert (4B)
+
+Safe revert requires exact batch→effect provenance written during processing into
+`discovery_batch_effects` (migration `009`). Historical batches without rows
+return `revertible: false` / `legacy_provenance_unavailable` — never infer
+destructive revert from URL matching alone.
+
+ChatGPT flow (after connector refresh):
+
+1. User: `Preview reverting batch <batch-id>`
+2. `preview_discovery_batch_revert` (`jobs:read`, read-only)
+3. Display plan + protected records + full 64-char `preview_hash` (`discovery-batch-revert-v1`)
+4. User explicitly confirms
+5. `revert_discovery_batch` with exact `preview_hash` (`jobs:revert` only — not `jobs:delete`)
+6. MCP compensates atomically and appends `discovery_batch_revert_events`
+7. Idempotency key = successful `preview_hash`; identical retries return the original event
+
+**Auth0 manual setup after deploy (do not automate):**
+
+| Audience | Permissions to grant |
+|---|---|
+| ChatGPT connector | `jobs:read` `jobs:write` `jobs:revert` — never `jobs:worker` / `jobs:delete` |
+| GitHub Actions M2M | `jobs:read` `jobs:write` `jobs:worker` — never required for `jobs:delete` / `jobs:revert` |
+| Operators needing job delete | grant `jobs:delete` separately (exposes `delete_job` only) |
+
+Policy: **partially protected batches reject the entire revert** (no silent partial compensation). Never delete applications, GPT evaluations, Python evaluations, discovery runs, or inbox payloads. Created postings are withdrawn (`posting_status=withdrawn`); updated postings restore trustworthy `before_state`. Any application on an affected posting blocks the batch.
+
+Worker-only tools (not for ChatGPT):
+
+- `claim_discovery_batch` / `complete_discovery_batch` / `fail_discovery_batch`
+- `apply_discovery_batch_job_persistence`
+- `recover_stale_discovery_batch_claims`
+
+Public ChatGPT tools for Milestone 4B:
+
+- `preview_discovery_batch_revert` — read-only compensating plan + `preview_hash`
+- `revert_discovery_batch` — atomic compensation requiring matching `preview_hash` and `jobs:revert`
+
+#### Milestone 4 production rollout
+
+1. Apply migration `009_discovery_batch_provenance_revert.sql` (after 008)
+2. Create Auth0 API permissions `jobs:worker` and `jobs:revert`; assign as above
+3. Deploy remote MCP + Python agent that uses atomic apply
+4. Smoke-test manual `process_discovery_inbox` and `preview_discovery_batch_revert`
+5. Enable `DISCOVERY_INBOX_SCHEDULE_ENABLED=true` (keep limit conservative)
+6. Refresh / recreate the ChatGPT MCP connector so new tools appear **without** worker/delete scopes
+7. Operator recovery: `workflow_dispatch` or CLI with `--recover-stale`; inspect failed batches via `get_discovery_batch`
+
 14. `get_discovery_rotation` — read-only; ordered enabled sources, current cursor, cycle ID, latest run status.
 15. `claim_next_discovery_source` — atomically claim the current source (`run_id`, `cycle_id`, source, `attempt_number`, checkpoint). Blocks concurrent active claims. Stale claims consume one attempt: below max they are `failed` and the same source is reclaimed; at `DISCOVERY_SOURCE_MAX_ATTEMPTS` the stale run becomes `skipped_after_failures` and the next enabled source is claimed in the same call (`stale_source_skipped`, `stale_source_key`, `recovered_stale_run_id`).
 16. `complete_discovery_source` — `run_id`, counters, optional `checkpoint`; marks completed and advances to the next enabled source (wraps to a new cycle at ashby after the last). Advances even when `qualified_count` is 0 and resets that source's failure count.
@@ -455,7 +541,7 @@ save_job → get_job → search_jobs → list_recent_jobs → delete_job
 ## Security model
 
 - Cryptographic JWT verification with Auth0 JWKS (`jose`) — signature, issuer, audience, expiration, nbf
-- Per-tool permission enforcement (`jobs:read|write|delete`) for both modern `Mcp-Method` / `Mcp-Name` headers and legacy JSON-RPC bodies
+- Per-tool permission enforcement (`jobs:read|write|delete|revert|worker`) for both modern `Mcp-Method` / `Mcp-Name` headers and legacy JSON-RPC bodies
 - Parameterized SQL via Neon tagged templates
 - Zod 4 validation on MCP inputs
 - Official MCP Python SDK for the remote client transport

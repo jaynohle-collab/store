@@ -19,6 +19,7 @@ from ..lifecycle import (
     CanonicalJobResolver,
     process_discovered_job,
 )
+from ..lifecycle.atomic_apply import build_atomic_apply_fields
 from ..lifecycle.evaluation_service import EvaluationService
 from ..lifecycle.process import DiscoveryRunTracker
 from ..lifecycle.types import PostingDisposition
@@ -43,6 +44,8 @@ class JobSearchWorkflow:
         duplicate_detector: DuplicateDetector | None = None,
         lifecycle_resolver: CanonicalJobResolver | None = None,
         evaluation_service: EvaluationService | None = None,
+        *,
+        defer_lifecycle_persist: bool = False,
     ):
         self.profile = profile
         self.providers = providers
@@ -52,6 +55,9 @@ class JobSearchWorkflow:
         self.duplicate_detector = duplicate_detector or DuplicateDetector(self.memory_store)
         self.lifecycle_resolver = lifecycle_resolver
         self.evaluation_service = evaluation_service
+        # When True, classify/score locally and attach apply payloads; MCP
+        # apply_discovery_batch_job_persistence commits mutation+provenance.
+        self.defer_lifecycle_persist = defer_lifecycle_persist
         if self.evaluation_service is None and lifecycle_resolver is not None:
             store = getattr(lifecycle_resolver, "store", None)
             if store is not None and hasattr(store, "save_job_evaluation"):
@@ -187,7 +193,7 @@ class JobSearchWorkflow:
             raw,
             self.lifecycle_resolver,
             match_score=score,
-            persist=True,
+            persist=not self.defer_lifecycle_persist,
         )
         tracker.record(result)
 
@@ -196,14 +202,17 @@ class JobSearchWorkflow:
             recommendation = "update_existing"
             duplicate = True
             reason = result.classification.reason
+            processing_action = "updated"
         elif disposition == PostingDisposition.REPOST:
             recommendation = "save_repost"
             duplicate = False
             reason = result.classification.reason
+            processing_action = "reposted"
         else:
             recommendation = "save"
             duplicate = False
             reason = result.classification.reason
+            processing_action = "created"
 
         memory_id = None
         if result.job_posting:
@@ -212,7 +221,8 @@ class JobSearchWorkflow:
             memory_id = result.canonical_job.get("id")
 
         if (
-            self.evaluation_service is not None
+            not self.defer_lifecycle_persist
+            and self.evaluation_service is not None
             and result.job_posting
             and result.job_posting.get("id")
         ):
@@ -230,6 +240,53 @@ class JobSearchWorkflow:
                 metadata=eval_metadata,
             )
 
+        before_state = result.classification.matched_posting
+        after_state = dict(result.job_posting) if result.job_posting else None
+        provenance = {
+            "processing_action": processing_action,
+            "created_canonical": bool(result.persistence_plan.create_canonical),
+            "created_posting": bool(result.persistence_plan.create_posting),
+            "canonical_job_id": (
+                str(result.canonical_job.get("id"))
+                if result.canonical_job and result.canonical_job.get("id")
+                else result.classification.canonical_job_id
+            ),
+            "posting_id": (
+                str(result.job_posting.get("id"))
+                if result.job_posting and result.job_posting.get("id")
+                else None
+            ),
+            "normalized_url": result.posting.normalized_url,
+            "source": result.posting.source,
+            "external_job_id": result.posting.external_job_id,
+            "company": result.posting.company,
+            "title": result.posting.title,
+            "before_state": before_state,
+            "after_state": after_state,
+            "evaluation_posting_id": (
+                str(result.job_posting.get("id"))
+                if result.job_posting and result.job_posting.get("id")
+                else None
+            ),
+        }
+        if self.defer_lifecycle_persist:
+            scoring_version = getattr(
+                self.evaluation_service, "scoring_version", "profile-v1"
+            )
+            profile_version = getattr(
+                self.evaluation_service, "profile_version", "jay-ai-v1"
+            )
+            provenance.update(
+                build_atomic_apply_fields(
+                    result,
+                    recommendation=recommendation,
+                    reason=reason,
+                    score_breakdown=score_breakdown,
+                    scoring_version=scoring_version,
+                    profile_version=profile_version,
+                )
+            )
+
         return JobMatch(
             job_input=job_input,
             posting=posting,
@@ -242,7 +299,17 @@ class JobSearchWorkflow:
                 confidence_score=1.0,
             ),
             memory_job_id=memory_id,
-            saved=result.persisted and disposition != PostingDisposition.SAME_POSTING,
+            saved=(
+                (
+                    result.persisted
+                    or (
+                        self.defer_lifecycle_persist
+                        and bool(result.persistence_plan.create_posting)
+                    )
+                )
+                and disposition != PostingDisposition.SAME_POSTING
+            ),
+            provenance=provenance,
         )
 
     async def _search_all_sources(self) -> list[JobInput]:

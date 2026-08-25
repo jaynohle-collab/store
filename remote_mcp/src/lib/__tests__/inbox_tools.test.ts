@@ -45,7 +45,7 @@ vi.mock("@/lib/db/inbox", async () => {
     listPendingDiscoveryBatches: vi.fn(async (limit = 20) => {
       return batches.filter((b) => b.status === "pending").slice(0, limit).map(clone);
     }),
-    claimDiscoveryBatch: vi.fn(async (id?: string) => {
+    claimDiscoveryBatch: vi.fn(async (id?: string, _options?: { worker_identity?: string }) => {
       const row = id
         ? batches.find((b) => b.id === id)
         : batches.find((b) => b.status === "pending");
@@ -53,23 +53,31 @@ vi.mock("@/lib/db/inbox", async () => {
       row.status = "processing";
       row.processing_started_at = new Date().toISOString();
       row.updated_at = new Date().toISOString();
+      row.active_attempt_id = `attempt-${batches.indexOf(row) + 1}`;
+      row.attempt_id = row.active_attempt_id;
+      row.worker_identity = _options?.worker_identity ?? "worker";
+      row.mutation_started = false;
       return clone(row);
     }),
-    completeDiscoveryBatch: vi.fn(async (id: string) => {
+    completeDiscoveryBatch: vi.fn(async (id: string, attemptId?: string) => {
       const row = batches.find((b) => b.id === id);
       if (!row || row.status !== "processing") return null;
+      if (!attemptId || row.active_attempt_id !== attemptId) return null;
       row.status = "completed";
       row.processed_at = new Date().toISOString();
       row.updated_at = new Date().toISOString();
+      row.active_attempt_id = null;
       return clone(row);
     }),
-    failDiscoveryBatch: vi.fn(async (id: string, error: string) => {
+    failDiscoveryBatch: vi.fn(async (id: string, error: string, attemptId?: string) => {
       const row = batches.find((b) => b.id === id);
       if (!row || row.status !== "processing") return null;
+      if (!attemptId || row.active_attempt_id !== attemptId) return null;
       row.status = "failed";
       row.error = error;
       row.processed_at = new Date().toISOString();
       row.updated_at = new Date().toISOString();
+      row.active_attempt_id = null;
       return clone(row);
     }),
   };
@@ -145,11 +153,11 @@ describe("MCP discovery inbox tools", () => {
     expect(String(tools.submit_discovery_batch.config.description)).toMatch(/duplicates/i);
   });
 
-  it("maps inbox tools to read/write scopes", () => {
+  it("maps inbox tools to read/write/worker scopes", () => {
     expect(TOOL_PERMISSIONS.submit_discovery_batch).toBe("jobs:write");
-    expect(TOOL_PERMISSIONS.claim_discovery_batch).toBe("jobs:write");
-    expect(TOOL_PERMISSIONS.complete_discovery_batch).toBe("jobs:write");
-    expect(TOOL_PERMISSIONS.fail_discovery_batch).toBe("jobs:write");
+    expect(TOOL_PERMISSIONS.claim_discovery_batch).toBe("jobs:worker");
+    expect(TOOL_PERMISSIONS.complete_discovery_batch).toBe("jobs:worker");
+    expect(TOOL_PERMISSIONS.fail_discovery_batch).toBe("jobs:worker");
     expect(TOOL_PERMISSIONS.get_discovery_batch).toBe("jobs:read");
     expect(TOOL_PERMISSIONS.list_pending_discovery_batches).toBe("jobs:read");
   });
@@ -313,46 +321,59 @@ describe("MCP discovery inbox tools", () => {
 
   it("atomically claims pending -> processing and cannot reclaim", async () => {
     const tools = register();
-    const extra = makeExtra(["jobs:write", "jobs:read"]);
+    const writer = makeExtra(["jobs:write", "jobs:read"]);
+    const worker = makeExtra(["jobs:worker", "jobs:read"]);
     const submitted = parse(
-      await tools.submit_discovery_batch.handler({ jobs: [VALID_JOB], source: "chatgpt" }, extra),
+      await tools.submit_discovery_batch.handler({ jobs: [VALID_JOB], source: "chatgpt" }, writer),
     );
     const id = (submitted.batch as Batch).id as string;
-    const first = parse(await tools.claim_discovery_batch.handler({ id }, extra));
+    const denied = parse(await tools.claim_discovery_batch.handler({ id }, writer));
+    expect(denied.isError).toBe(true);
+    const first = parse(await tools.claim_discovery_batch.handler({ id }, worker));
     expect(first.claimed).toBe(true);
     expect((first.batch as Batch).status).toBe("processing");
-    const second = parse(await tools.claim_discovery_batch.handler({ id }, extra));
+    expect((first.batch as Batch).attempt_id).toBeTruthy();
+    const second = parse(await tools.claim_discovery_batch.handler({ id }, worker));
     expect(second.claimed).toBe(false);
   });
 
   it("cannot claim a completed batch", async () => {
     const tools = register();
-    const extra = makeExtra(["jobs:write", "jobs:read"]);
+    const writer = makeExtra(["jobs:write", "jobs:read"]);
+    const worker = makeExtra(["jobs:worker", "jobs:read"]);
     const submitted = parse(
-      await tools.submit_discovery_batch.handler({ jobs: [VALID_JOB], source: "chatgpt" }, extra),
+      await tools.submit_discovery_batch.handler({ jobs: [VALID_JOB], source: "chatgpt" }, writer),
     );
     const id = (submitted.batch as Batch).id as string;
-    await tools.claim_discovery_batch.handler({ id }, extra);
-    const completed = parse(await tools.complete_discovery_batch.handler({ id }, extra));
+    const claimed = parse(await tools.claim_discovery_batch.handler({ id }, worker));
+    const attemptId = (claimed.batch as Batch).attempt_id as string;
+    const completed = parse(
+      await tools.complete_discovery_batch.handler({ id, attempt_id: attemptId }, worker),
+    );
     expect(completed.completed).toBe(true);
-    const claimed = parse(await tools.claim_discovery_batch.handler({ id }, extra));
-    expect(claimed.claimed).toBe(false);
+    const again = parse(await tools.claim_discovery_batch.handler({ id }, worker));
+    expect(again.claimed).toBe(false);
   });
 
   it("fail retains the raw payload", async () => {
     const tools = register();
-    const extra = makeExtra(["jobs:write", "jobs:read"]);
+    const writer = makeExtra(["jobs:write", "jobs:read"]);
+    const worker = makeExtra(["jobs:worker", "jobs:read"]);
     const submitted = parse(
-      await tools.submit_discovery_batch.handler({ jobs: [VALID_JOB], source: "chatgpt" }, extra),
+      await tools.submit_discovery_batch.handler({ jobs: [VALID_JOB], source: "chatgpt" }, writer),
     );
     const id = (submitted.batch as Batch).id as string;
-    await tools.claim_discovery_batch.handler({ id }, extra);
+    const claimed = parse(await tools.claim_discovery_batch.handler({ id }, worker));
+    const attemptId = (claimed.batch as Batch).attempt_id as string;
     const failed = parse(
-      await tools.fail_discovery_batch.handler({ id, error: "python failed" }, extra),
+      await tools.fail_discovery_batch.handler(
+        { id, attempt_id: attemptId, error: "python failed" },
+        worker,
+      ),
     );
     expect((failed.batch as Batch).status).toBe("failed");
     expect((failed.batch as Batch).error).toBe("python failed");
-    const fetched = parse(await tools.get_discovery_batch.handler({ id }, extra));
+    const fetched = parse(await tools.get_discovery_batch.handler({ id }, writer));
     expect(((fetched.batch as Batch).payload as { jobs: unknown[] }).jobs).toHaveLength(1);
   });
 });

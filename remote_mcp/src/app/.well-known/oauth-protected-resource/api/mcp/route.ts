@@ -28,7 +28,13 @@ export function GET() {
     authServerUrls: [issuer],
     resourceUrl: getProtectedResourceUrl(),
     additionalMetadata: {
-      scopes_supported: [SCOPES.READ, SCOPES.WRITE, SCOPES.DELETE],
+      scopes_supported: [
+        SCOPES.READ,
+        SCOPES.WRITE,
+        SCOPES.DELETE,
+        SCOPES.REVERT,
+        SCOPES.WORKER,
+      ],
       bearer_methods_supported: ["header"],
     },
   });

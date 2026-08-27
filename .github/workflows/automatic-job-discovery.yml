@@ -1,0 +1,112 @@
+name: Automatic Job Discovery
+
+# Producer workflow: claim due companies → ATS adapters → gpt-fit-v2 → submit
+# discovery batches, then hand off to the existing inbox processor in the same run.
+#
+# Scheduled runs require repository variable:
+#   AUTO_DISCOVERY_SCHEDULE_ENABLED=true
+# Manual workflow_dispatch always runs.
+on:
+  workflow_dispatch:
+    inputs:
+      max_companies:
+        description: "Max companies to claim this run"
+        required: false
+        default: "10"
+      skip_inbox_handoff:
+        description: "Set true to skip process_discovery_inbox after producer"
+        required: false
+        default: "false"
+  schedule:
+    # Every 6 hours — balances freshness vs free-plan Actions minutes.
+    - cron: "0 */6 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: automatic-job-discovery
+  cancel-in-progress: false
+
+jobs:
+  automatic-discovery:
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      vars.AUTO_DISCOVERY_SCHEDULE_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      JOB_PERSISTENCE_MODE: remote
+      JOB_MCP_URL: https://jay-job-mcp.vercel.app/api/mcp
+      AUTH0_TOKEN_URL: https://jay-job.us.auth0.com/oauth/token
+      AUTH0_AUDIENCE: https://jay-job-mcp-michaeltchueng-2909s-projects.vercel.app/api/mcp
+      AUTH0_SCOPES: jobs:read jobs:write jobs:worker
+      AUTH0_CLIENT_ID: ${{ secrets.AUTH0_CLIENT_ID }}
+      AUTH0_CLIENT_SECRET: ${{ secrets.AUTH0_CLIENT_SECRET }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      AUTO_DISCOVERY_WORKER_IDENTITY: github-actions
+      AUTO_DISCOVERY_MAX_COMPANIES: ${{ github.event.inputs.max_companies || vars.AUTO_DISCOVERY_MAX_COMPANIES || '10' }}
+      DISCOVERY_INBOX_WORKER_IDENTITY: github-actions
+      DISCOVERY_INBOX_BATCH_LIMIT: ${{ vars.DISCOVERY_INBOX_BATCH_LIMIT || '5' }}
+      DISCOVERY_INBOX_STALE_PROCESSING_MINUTES: ${{ vars.DISCOVERY_INBOX_STALE_PROCESSING_MINUTES || '60' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify required secrets are present
+        env:
+          AUTH0_CLIENT_ID: ${{ secrets.AUTH0_CLIENT_ID }}
+          AUTH0_CLIENT_SECRET: ${{ secrets.AUTH0_CLIENT_SECRET }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          set -euo pipefail
+          missing=0
+          if [ -z "${AUTH0_CLIENT_ID}" ]; then echo "AUTH0_CLIENT_ID is not configured"; missing=1; fi
+          if [ -z "${AUTH0_CLIENT_SECRET}" ]; then echo "AUTH0_CLIENT_SECRET is not configured"; missing=1; fi
+          llm_ok=0
+          if [ -n "${GEMINI_API_KEY}" ]; then llm_ok=1; fi
+          if [ -n "${GROQ_API_KEY}" ]; then llm_ok=1; fi
+          if [ -n "${OPENAI_API_KEY}" ]; then llm_ok=1; fi
+          if [ "$llm_ok" -eq 0 ]; then
+            echo "At least one of GEMINI_API_KEY / GROQ_API_KEY / OPENAI_API_KEY must be configured"
+            missing=1
+          fi
+          # Never print secret values.
+          if [ "$missing" -ne 0 ]; then exit 1; fi
+          echo "Required Auth0 M2M and LLM secrets are present (values not logged)"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Run automatic discovery producer
+        run: |
+          set -euo pipefail
+          MAX="${AUTO_DISCOVERY_MAX_COMPANIES}"
+          echo "Claiming up to ${MAX} due discovery company(ies)"
+          # Secrets and Neon connection strings are never echoed.
+          python -m job_agent.examples.automatic_discovery_run \
+            --max-companies "${MAX}" \
+            --skip-inbox-handoff
+
+      - name: Process pending discovery inbox batches
+        if: ${{ github.event.inputs.skip_inbox_handoff != 'true' }}
+        run: |
+          set -euo pipefail
+          LIMIT="${DISCOVERY_INBOX_BATCH_LIMIT}"
+          echo "Processing up to ${LIMIT} pending discovery inbox batch(es)"
+          python -m job_agent.examples.process_discovery_inbox \
+            --limit "${LIMIT}" \
+            --recover-stale \
+            --fail-on-batch-failure

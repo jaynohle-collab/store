@@ -1,0 +1,20 @@
+{
+  "jobs": [
+    {
+      "id": "ashby-1",
+      "title": "Senior AI Engineer",
+      "jobUrl": "https://jobs.ashbyhq.com/notion/ashby-1",
+      "location": "Remote, US",
+      "isRemote": true,
+      "publishedAt": "2026-08-18T12:00:00.000Z",
+      "descriptionPlain": "Ship LLM agents and retrieval systems."
+    },
+    {
+      "id": "ashby-2",
+      "title": "Office Manager",
+      "jobUrl": "https://jobs.ashbyhq.com/notion/ashby-2",
+      "isRemote": false,
+      "descriptionPlain": "Coordinate office operations."
+    }
+  ]
+}

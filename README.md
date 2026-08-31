@@ -517,6 +517,63 @@ Public ChatGPT tools for Milestone 4B:
 6. Refresh / recreate the ChatGPT MCP connector so new tools appear **without** worker/delete scopes
 7. Operator recovery: `workflow_dispatch` or CLI with `--recover-stale`; inspect failed batches via `get_discovery_batch`
 
+### Milestone 5 — automatic job discovery producer
+
+Makes discovery operational without opening ChatGPT. Applications stay manual.
+
+#### Architecture flow
+
+```
+GitHub Actions automatic-job-discovery (cron */6h + kill switch)
+  → claim_due_discovery_companies (MCP lease)
+  → official ATS adapters (Greenhouse / Ashby / Lever / Workday / careers)
+  → deterministic rejects → check_discovery_candidates
+  → full JD + description_hash (fingerprint-v1)
+  → provider-neutral gpt-fit-v2 LLM eval (Gemini → Groq → OpenAI)
+  → record_discovery_evaluations + submit_discovery_batch
+  → process_discovery_inbox (same workflow handoff; scheduled inbox remains fallback)
+```
+
+MCP owns company registry, leases, run metrics, storage observability. Python owns crawl + evaluation. Existing inbox / provenance / revert contracts are unchanged.
+
+#### Company registry
+
+Migration `010_automatic_discovery_companies.sql` adds `discovery_companies`, `discovery_company_runs`, and `automatic_discovery_runs`, plus a small official-API seed set that is **disabled by default** (`enabled=FALSE`) so turning on the schedule cannot unexpectedly fan out scans. Operators must explicitly enable companies. Adaptive next-scan: hot ~6h, high ~1d, normal ~5d, inactive ~30d; failures use exponential backoff (cap 30d). Concurrent workers use lease ownership + stale recovery.
+
+Migration `011_discovery_pending_evaluations.sql` adds a durable pending-evaluation queue for candidates that passed deterministic/preflight gates but could not be LLM-evaluated.
+
+#### Adapters
+
+`job_agent/auto_discovery/adapters/` — official HTTPS APIs only, SSRF allowlist, injectable httpx transport for tests. Extension path exists for Workable / SmartRecruiters / etc.; implement only when a reliable official surface exists.
+
+#### LLM providers
+
+`AUTO_DISCOVERY_LLM_PROVIDER` optional single-provider override. Otherwise all configured keys among Gemini → Groq → OpenAI form a **runtime fallback chain**: quota, HTTP 429, and transient 5xx/network errors try the next provider. Invalid model JSON fails closed (never QUALIFIED). If every provider is unavailable, unevaluated candidates are preserved in `discovery_pending_evaluations` (not merely left for a later ATS re-scan). The next run resumes those rows first, using deterministic `client_evaluation_id` fingerprints so evaluations/submissions are not duplicated. Already-QUALIFIED jobs collected before pause are still submitted.
+
+#### Kill switches and bounds
+
+- Schedule: repository variable `AUTO_DISCOVERY_SCHEDULE_ENABLED=true` (cron `0 */6 * * *`); `workflow_dispatch` always runs
+- Inbox schedule remains `DISCOVERY_INBOX_SCHEDULE_ENABLED`
+- Env bounds: `AUTO_DISCOVERY_MAX_COMPANIES`, `AUTO_DISCOVERY_MAX_CANDIDATES_PER_COMPANY`, `AUTO_DISCOVERY_MAX_EVALS_PER_RUN`, `AUTO_DISCOVERY_MAX_BATCHES_PER_RUN`, `AUTO_DISCOVERY_MAX_JOBS_PER_BATCH`
+- Workflow: Auth0 secrets + at least one LLM key; never prints secret values; `contents: read`; concurrency group; `timeout-minutes: 60`
+
+#### Retention (dry-run only)
+
+MCP tools `get_storage_observability` and `preview_description_retention` report Neon size / reclaimable inactive description bytes. Soft warning at ~80% of a configurable soft limit. Production description cleanup stays **disabled** in this milestone.
+
+#### Dashboard
+
+`/dashboard/discovery` shows an automatic discovery status panel (latest runs, due/failed companies, pending/failed batches, next scan). Missing migration tables surface a graceful error message.
+
+#### Milestone 5 production rollout
+
+1. Apply migration `010_automatic_discovery_companies.sql` (after 009)
+2. Deploy MCP (company tools) + Python `job_agent.auto_discovery`
+3. Configure Auth0 M2M with `jobs:read jobs:write jobs:worker` and at least one LLM secret
+4. Smoke-test `python -m job_agent.examples.automatic_discovery_run --max-companies 1 --skip-inbox-handoff`
+5. Enable `AUTO_DISCOVERY_SCHEDULE_ENABLED=true` only after a successful manual run
+6. Keep `DISCOVERY_REQUIRE_GPT_EVALUATION=true` and gpt-fit-v2 quality gates as already configured
+
 14. `get_discovery_rotation` — read-only; ordered enabled sources, current cursor, cycle ID, latest run status.
 15. `claim_next_discovery_source` — atomically claim the current source (`run_id`, `cycle_id`, source, `attempt_number`, checkpoint). Blocks concurrent active claims. Stale claims consume one attempt: below max they are `failed` and the same source is reclaimed; at `DISCOVERY_SOURCE_MAX_ATTEMPTS` the stale run becomes `skipped_after_failures` and the next enabled source is claimed in the same call (`stale_source_skipped`, `stale_source_key`, `recovered_stale_run_id`).
 16. `complete_discovery_source` — `run_id`, counters, optional `checkpoint`; marks completed and advances to the next enabled source (wraps to a new cycle at ashby after the last). Advances even when `qualified_count` is 0 and resets that source's failure count.

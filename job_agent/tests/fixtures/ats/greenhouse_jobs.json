@@ -1,0 +1,19 @@
+{
+  "jobs": [
+    {
+      "id": 1001,
+      "title": "Staff Platform Engineer",
+      "absolute_url": "https://boards.greenhouse.io/stripe/jobs/1001",
+      "location": { "name": "Remote - United States" },
+      "updated_at": "2026-08-20T00:00:00.000Z",
+      "content": "Build distributed systems and AI platform services."
+    },
+    {
+      "id": 1002,
+      "title": "Closed Role - Filled",
+      "absolute_url": "https://boards.greenhouse.io/stripe/jobs/1002",
+      "location": { "name": "New York" },
+      "content": "This position has been filled."
+    }
+  ]
+}

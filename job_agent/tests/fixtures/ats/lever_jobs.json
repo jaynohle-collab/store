@@ -1,0 +1,16 @@
+[
+  {
+    "id": "lever-1",
+    "text": "Backend Engineer, Platform",
+    "hostedUrl": "https://jobs.lever.co/netflix/lever-1",
+    "categories": { "location": "Remote, United States" },
+    "descriptionPlain": "Design scalable backend services."
+  },
+  {
+    "id": "lever-2",
+    "text": "Intern",
+    "hostedUrl": "https://jobs.lever.co/netflix/lever-2",
+    "categories": { "location": "Los Angeles" },
+    "descriptionPlain": "Summer internship."
+  }
+]

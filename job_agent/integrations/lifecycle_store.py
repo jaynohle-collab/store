@@ -272,3 +272,93 @@ class RemoteLifecycleStore:
             args["requested_by"] = requested_by
         result = await self._call("revert_discovery_batch", args)
         return dict(result or {})
+
+    # --- Discovery preflight / GPT evidence / automatic discovery control plane ---
+
+    async def check_discovery_candidates(self, payload: dict[str, Any]) -> dict[str, Any]:
+        result = await self._call("check_discovery_candidates", payload)
+        return dict(result or {})
+
+    async def compute_discovery_description_hashes(
+        self, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        result = await self._call("compute_discovery_description_hashes", payload)
+        return dict(result or {})
+
+    async def record_discovery_evaluations(self, payload: dict[str, Any]) -> dict[str, Any]:
+        result = await self._call("record_discovery_evaluations", payload)
+        return dict(result or {})
+
+    async def list_discovery_companies(
+        self, limit: int = 100, offset: int = 0
+    ) -> list[dict[str, Any]]:
+        result = await self._call(
+            "list_discovery_companies",
+            {"limit": min(limit, 500), "offset": max(offset, 0)},
+        )
+        return list((result or {}).get("companies") or [])
+
+    async def upsert_discovery_company(self, payload: dict[str, Any]) -> dict[str, Any]:
+        cleaned = {k: v for k, v in payload.items() if v is not None}
+        result = await self._call("upsert_discovery_company", cleaned)
+        return (result or {}).get("company") or result
+
+    async def claim_due_discovery_companies(
+        self, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        result = await self._call("claim_due_discovery_companies", payload or {})
+        return dict(result or {})
+
+    async def complete_discovery_company_run(
+        self, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        result = await self._call("complete_discovery_company_run", payload)
+        return dict(result or {})
+
+    async def fail_discovery_company_run(self, payload: dict[str, Any]) -> dict[str, Any]:
+        result = await self._call("fail_discovery_company_run", payload)
+        return dict(result or {})
+
+    async def start_automatic_discovery_run(
+        self, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        result = await self._call("start_automatic_discovery_run", payload or {})
+        return (result or {}).get("run") or dict(result or {})
+
+    async def finish_automatic_discovery_run(
+        self, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        result = await self._call("finish_automatic_discovery_run", payload)
+        return (result or {}).get("run") or dict(result or {})
+
+    async def get_automatic_discovery_status(self) -> dict[str, Any]:
+        result = await self._call("get_automatic_discovery_status", {})
+        return dict(result or {})
+
+    async def get_storage_observability(self) -> dict[str, Any]:
+        result = await self._call("get_storage_observability", {})
+        return dict(result or {})
+
+    async def preview_description_retention(
+        self, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        result = await self._call("preview_description_retention", payload or {})
+        return dict(result or {})
+
+    async def preserve_pending_discovery_evaluations(
+        self, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        result = await self._call("preserve_pending_discovery_evaluations", payload)
+        return dict(result or {})
+
+    async def claim_pending_discovery_evaluations(
+        self, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        result = await self._call("claim_pending_discovery_evaluations", payload or {})
+        return dict(result or {})
+
+    async def complete_pending_discovery_evaluation(
+        self, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        result = await self._call("complete_pending_discovery_evaluation", payload)
+        return dict(result or {})

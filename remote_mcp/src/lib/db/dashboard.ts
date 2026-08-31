@@ -971,3 +971,6 @@ export async function listDiscoveryRunsPage(limit = 30, offset = 0) {
   const runs = mapped.slice(0, limit);
   return { discovery_runs: runs, nextOffset: hasMore ? offset + runs.length : null };
 }
+
+/** Re-export for dashboard pages — Milestone 5 automatic discovery status. */
+export { getAutomaticDiscoveryStatus } from "./discovery_companies";

@@ -77,6 +77,8 @@ export const completeDiscoveryCompanyRunSchema = z
     run_id: z.string().uuid(),
     metrics: z.record(z.string(), z.unknown()).optional().default({}),
     success: z.boolean().default(true),
+    // Accepted and ignored: workers may echo identity; lease ownership is run_id-based.
+    worker_identity: z.string().min(1).max(128).optional(),
   })
   .strict();
 
@@ -98,6 +100,8 @@ export const failDiscoveryCompanyRunSchema = z
       .default("unknown"),
     error_summary: z.string().max(1000),
     metrics: z.record(z.string(), z.unknown()).optional().default({}),
+    // Accepted and ignored: workers may echo identity; lease ownership is run_id-based.
+    worker_identity: z.string().min(1).max(128).optional(),
   })
   .strict();
 

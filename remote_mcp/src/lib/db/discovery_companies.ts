@@ -399,18 +399,36 @@ export async function completeDiscoveryCompanyRun(
   const priority = String(prior.scan_priority || "normal") as ScanPriority;
   const next = computeNextEligibleAt({ priority, success: input.success });
 
+  // Lock ownership first. Both mutations are driven only from that locked set so a
+  // missing company match cannot leave a terminal run while the lease stays active.
+  // If either mutation count mismatches eligible, abort the statement (1/0) so CTE
+  // side effects do not commit.
   const results = await sql.transaction([
     sql`
-      WITH done AS (
-        UPDATE discovery_company_runs
+      WITH eligible AS (
+        SELECT
+          r.id AS run_id,
+          r.company_id
+        FROM discovery_company_runs r
+        INNER JOIN discovery_companies c
+          ON c.id = r.company_id
+         AND c.active_run_id = r.id
+        WHERE r.id = ${input.run_id}::uuid
+          AND r.status = 'claimed'
+          AND r.worker_identity = ${workerIdentity}
+        FOR UPDATE OF r, c
+      ),
+      done AS (
+        UPDATE discovery_company_runs r
         SET status = 'completed',
             completed_at = NOW(),
             metrics = ${metricsJson}::jsonb,
             updated_at = NOW()
-        WHERE id = ${input.run_id}::uuid
-          AND status = 'claimed'
-          AND worker_identity = ${workerIdentity}
-        RETURNING *
+        FROM eligible e
+        WHERE r.id = e.run_id
+          AND r.status = 'claimed'
+          AND r.worker_identity = ${workerIdentity}
+        RETURNING r.*
       ),
       company AS (
         UPDATE discovery_companies c
@@ -424,14 +442,24 @@ export async function completeDiscoveryCompanyRun(
             next_eligible_at = ${next},
             stats = COALESCE(stats, '{}'::jsonb) || ${metricsJson}::jsonb,
             updated_at = NOW()
-        FROM done d
-        WHERE c.id = d.company_id
-          AND c.active_run_id = d.id
+        FROM eligible e
+        WHERE c.id = e.company_id
+          AND c.active_run_id = e.run_id
         RETURNING c.id
+      ),
+      assert_atomic AS (
+        SELECT CASE
+          WHEN (SELECT COUNT(*)::int FROM eligible) = 0 THEN TRUE
+          WHEN (SELECT COUNT(*)::int FROM done) = 1
+           AND (SELECT COUNT(*)::int FROM company) = 1 THEN TRUE
+          ELSE (1 / 0)::boolean
+        END AS ok
       )
       SELECT d.*
       FROM done d
-      WHERE EXISTS (SELECT 1 FROM company)
+      CROSS JOIN assert_atomic a
+      WHERE a.ok
+        AND EXISTS (SELECT 1 FROM company)
     `,
   ]);
   const rows = results[0] ?? [];
@@ -453,6 +481,12 @@ export async function completeDiscoveryCompanyRun(
     }
     if (status === "claimed" && owner !== workerIdentity) {
       throw new Error("discovery_company_run_owner_mismatch");
+    }
+    if (
+      status === "claimed" &&
+      String(row.company_active_run_id || "") !== input.run_id
+    ) {
+      throw new Error("discovery_company_run_lease_not_active");
     }
     throw new Error(`discovery_company_run_not_claimable:${status}`);
   }
@@ -518,18 +552,32 @@ export async function failDiscoveryCompanyRun(
 
   const results = await sql.transaction([
     sql`
-      WITH done AS (
-        UPDATE discovery_company_runs
+      WITH eligible AS (
+        SELECT
+          r.id AS run_id,
+          r.company_id
+        FROM discovery_company_runs r
+        INNER JOIN discovery_companies c
+          ON c.id = r.company_id
+         AND c.active_run_id = r.id
+        WHERE r.id = ${input.run_id}::uuid
+          AND r.status = 'claimed'
+          AND r.worker_identity = ${workerIdentity}
+        FOR UPDATE OF r, c
+      ),
+      done AS (
+        UPDATE discovery_company_runs r
         SET status = 'failed',
             completed_at = NOW(),
             error_category = ${input.error_category},
             error_summary = ${summary},
             metrics = ${metricsJson}::jsonb,
             updated_at = NOW()
-        WHERE id = ${input.run_id}::uuid
-          AND status = 'claimed'
-          AND worker_identity = ${workerIdentity}
-        RETURNING *
+        FROM eligible e
+        WHERE r.id = e.run_id
+          AND r.status = 'claimed'
+          AND r.worker_identity = ${workerIdentity}
+        RETURNING r.*
       ),
       company AS (
         UPDATE discovery_companies c
@@ -541,21 +589,32 @@ export async function failDiscoveryCompanyRun(
             next_eligible_at = ${next},
             backoff_until = ${next},
             updated_at = NOW()
-        FROM done d
-        WHERE c.id = d.company_id
-          AND c.active_run_id = d.id
+        FROM eligible e
+        WHERE c.id = e.company_id
+          AND c.active_run_id = e.run_id
         RETURNING c.id
+      ),
+      assert_atomic AS (
+        SELECT CASE
+          WHEN (SELECT COUNT(*)::int FROM eligible) = 0 THEN TRUE
+          WHEN (SELECT COUNT(*)::int FROM done) = 1
+           AND (SELECT COUNT(*)::int FROM company) = 1 THEN TRUE
+          ELSE (1 / 0)::boolean
+        END AS ok
       )
       SELECT d.*
       FROM done d
-      WHERE EXISTS (SELECT 1 FROM company)
+      CROSS JOIN assert_atomic a
+      WHERE a.ok
+        AND EXISTS (SELECT 1 FROM company)
     `,
   ]);
   const rows = results[0] ?? [];
   if (!rows.length) {
     const again = await getSql()`
-      SELECT r.*
+      SELECT r.*, c.active_run_id AS company_active_run_id
       FROM discovery_company_runs r
+      JOIN discovery_companies c ON c.id = r.company_id
       WHERE r.id = ${input.run_id}::uuid
     `;
     const row = (again as Record<string, unknown>[])[0];
@@ -569,6 +628,12 @@ export async function failDiscoveryCompanyRun(
     }
     if (status === "claimed" && owner !== workerIdentity) {
       throw new Error("discovery_company_run_owner_mismatch");
+    }
+    if (
+      status === "claimed" &&
+      String(row.company_active_run_id || "") !== input.run_id
+    ) {
+      throw new Error("discovery_company_run_lease_not_active");
     }
     throw new Error(`discovery_company_run_not_claimable:${status}`);
   }

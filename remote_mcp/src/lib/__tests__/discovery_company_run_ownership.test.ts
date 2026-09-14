@@ -1,9 +1,176 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+const RUN_ID = "11111111-1111-4111-8111-111111111111";
+const COMPANY_ID = "22222222-2222-4222-8222-222222222222";
+const OTHER_RUN_ID = "33333333-3333-4333-8333-333333333333";
+
+type CompanyRow = {
+  id: string;
+  active_run_id: string | null;
+  consecutive_failures: number;
+  scan_priority: string;
+  lease_expires_at: string | null;
+  last_error_category: string | null;
+  last_error_summary: string | null;
+};
+
+type RunRow = {
+  id: string;
+  company_id: string;
+  status: "claimed" | "completed" | "failed" | "expired";
+  worker_identity: string;
+  error_category?: string | null;
+  error_summary?: string | null;
+  metrics?: Record<string, unknown>;
+  completed_at?: string | null;
+};
+
+const { companies, runs, txCalls, pendingLifecycle } = vi.hoisted(() => ({
+  companies: new Map<string, CompanyRow>(),
+  runs: new Map<string, RunRow>(),
+  txCalls: { count: 0 },
+  pendingLifecycle: {
+    current: null as null | {
+      runId: string;
+      workerIdentity: string;
+      mode: "completed" | "failed";
+      errorCategory?: string;
+      errorSummary?: string;
+    },
+  },
+}));
+
+function snapshotState() {
+  return {
+    companies: structuredClone([...companies.entries()]),
+    runs: structuredClone([...runs.entries()]),
+  };
+}
+
+/**
+ * Faithful model of the eligible-locked complete/fail statement:
+ * lock ownership first; mutate both only from that set; abort if partial.
+ */
+function applyOwnedLifecycleSql(opts: {
+  runId: string;
+  workerIdentity: string;
+  mode: "completed" | "failed";
+  errorCategory?: string;
+  errorSummary?: string;
+}): Record<string, unknown>[] {
+  const run = runs.get(opts.runId);
+  if (!run) return [];
+  const company = companies.get(run.company_id);
+  if (!company) return [];
+
+  const eligible =
+    run.status === "claimed" &&
+    run.worker_identity === opts.workerIdentity &&
+    company.active_run_id === run.id;
+
+  if (!eligible) {
+    return [];
+  }
+
+  // Both mutations driven from eligible — never update run without company match.
+  const before = snapshotState();
+  try {
+    run.status = opts.mode;
+    run.completed_at = new Date().toISOString();
+    if (opts.mode === "failed") {
+      run.error_category = opts.errorCategory ?? "unknown";
+      run.error_summary = opts.errorSummary ?? "failed";
+      company.consecutive_failures += 1;
+      company.last_error_category = run.error_category;
+      company.last_error_summary = run.error_summary;
+    } else {
+      company.consecutive_failures = 0;
+      company.last_error_category = null;
+      company.last_error_summary = null;
+    }
+    if (company.active_run_id !== run.id) {
+      throw new Error("partial_transition");
+    }
+    company.active_run_id = null;
+    company.lease_expires_at = null;
+    return [{ ...run }];
+  } catch {
+    // Simulate statement abort: restore both rows.
+    companies.clear();
+    runs.clear();
+    for (const [k, v] of before.companies) companies.set(k, v);
+    for (const [k, v] of before.runs) runs.set(k, v);
+    throw new Error("assert_atomic_failed");
+  }
+}
+
+vi.mock("@/lib/db/client", () => {
+  const sql = (strings: TemplateStringsArray, ...values: unknown[]) => {
+    const text = strings.join("?");
+    if (text.includes("WITH eligible AS") && text.includes("FOR UPDATE OF r, c")) {
+      const mode = text.includes("status = 'completed'") ? "completed" : "failed";
+      pendingLifecycle.current = {
+        runId: String(values[0]),
+        workerIdentity: String(values[1]),
+        mode,
+        errorCategory: mode === "failed" ? String(values[2]) : undefined,
+        errorSummary: mode === "failed" ? String(values[3]) : undefined,
+      };
+      return { kind: "lifecycle", mode };
+    }
+    if (
+      text.includes("FROM discovery_company_runs r") &&
+      text.includes("JOIN discovery_companies c") &&
+      text.includes("company_active_run_id")
+    ) {
+      const runId = String(values[0] ?? "");
+      const run = runs.get(runId);
+      if (!run) return [];
+      const company = companies.get(run.company_id);
+      if (!company) return [];
+      return [
+        {
+          ...run,
+          scan_priority: company.scan_priority,
+          consecutive_failures: company.consecutive_failures,
+          company_active_run_id: company.active_run_id,
+        },
+      ];
+    }
+    return [];
+  };
+
+  (sql as { transaction?: unknown }).transaction = async () => {
+    txCalls.count += 1;
+    const pending = pendingLifecycle.current;
+    pendingLifecycle.current = null;
+    if (!pending) return [[]];
+    const rows = applyOwnedLifecycleSql(pending);
+    return [rows];
+  };
+
+  return {
+    getSql: () => sql,
+    getTransactionalSql: () => sql,
+  };
+});
+
+vi.mock("@/lib/config", async () => {
+  const actual = await vi.importActual<typeof import("@/lib/config")>(
+    "@/lib/config",
+  );
+  return {
+    ...actual,
+    getDatabaseUrl: () => "postgres://test",
+  };
+});
 
 import {
+  completeDiscoveryCompanyRun,
   completeDiscoveryCompanyRunSchema,
+  failDiscoveryCompanyRun,
   failDiscoveryCompanyRunSchema,
 } from "@/lib/db/discovery_companies";
 
@@ -27,119 +194,24 @@ const failSrc = sliceFunction(
   "export async function startAutomaticDiscoveryRun",
 );
 
-const RUN_ID = "11111111-1111-1111-1111-111111111111";
-const COMPANY_ID = "22222222-2222-2222-2222-222222222222";
-
-type CompanyRow = {
-  id: string;
-  active_run_id: string | null;
-  consecutive_failures: number;
-  scan_priority: string;
-};
-
-type RunRow = {
-  id: string;
-  company_id: string;
-  status: "claimed" | "completed" | "failed" | "expired";
-  worker_identity: string;
-  error_category?: string | null;
-  error_summary?: string | null;
-};
-
-/**
- * Models the ownership predicates used by complete/fail:
- * update run only when claimed + matching worker_identity;
- * clear company lease only when active_run_id still references that run.
- */
-function finishOwnedRun(
-  companies: Map<string, CompanyRow>,
-  runs: Map<string, RunRow>,
-  opts: {
-    runId: string;
-    workerIdentity: string;
-    mode: "completed" | "failed";
-  },
-): { ok: true; idempotent_replay: boolean } | { error: string } {
-  const run = runs.get(opts.runId);
-  if (!run) return { error: "not_found" };
-  const company = companies.get(run.company_id);
-  if (!company) return { error: "not_found" };
-
-  if (run.status === opts.mode) {
-    if (run.worker_identity !== opts.workerIdentity) {
-      return { error: "discovery_company_run_owner_mismatch" };
-    }
-    return { ok: true, idempotent_replay: true };
-  }
-
-  if (run.status !== "claimed") {
-    return { error: `discovery_company_run_not_claimable:${run.status}` };
-  }
-  if (run.worker_identity !== opts.workerIdentity) {
-    return { error: "discovery_company_run_owner_mismatch" };
-  }
-  if (company.active_run_id !== run.id) {
-    return { error: "discovery_company_run_lease_not_active" };
-  }
-
-  // Atomic predicate simulation (single success path).
-  if (
-    run.status !== "claimed" ||
-    run.worker_identity !== opts.workerIdentity ||
-    company.active_run_id !== run.id
-  ) {
-    return { error: "race" };
-  }
-
-  run.status = opts.mode;
-  company.active_run_id = null;
-  if (opts.mode === "failed") {
-    company.consecutive_failures += 1;
-  } else {
-    company.consecutive_failures = 0;
-  }
-  return { ok: true, idempotent_replay: false };
-}
-
-function recoverStale(
-  companies: Map<string, CompanyRow>,
-  runs: Map<string, RunRow>,
-  runId: string,
-) {
-  const run = runs.get(runId);
-  if (!run || run.status !== "claimed") return false;
-  const company = companies.get(run.company_id);
-  if (!company || company.active_run_id !== run.id) return false;
-  run.status = "expired";
-  company.active_run_id = null;
-  company.consecutive_failures += 1;
-  return true;
-}
-
 function seedClaimed(worker = "github-actions") {
-  const companies = new Map<string, CompanyRow>([
-    [
-      COMPANY_ID,
-      {
-        id: COMPANY_ID,
-        active_run_id: RUN_ID,
-        consecutive_failures: 0,
-        scan_priority: "manual",
-      },
-    ],
-  ]);
-  const runs = new Map<string, RunRow>([
-    [
-      RUN_ID,
-      {
-        id: RUN_ID,
-        company_id: COMPANY_ID,
-        status: "claimed",
-        worker_identity: worker,
-      },
-    ],
-  ]);
-  return { companies, runs };
+  companies.clear();
+  runs.clear();
+  companies.set(COMPANY_ID, {
+    id: COMPANY_ID,
+    active_run_id: RUN_ID,
+    consecutive_failures: 0,
+    scan_priority: "manual",
+    lease_expires_at: new Date(Date.now() + 30 * 60_000).toISOString(),
+    last_error_category: null,
+    last_error_summary: null,
+  });
+  runs.set(RUN_ID, {
+    id: RUN_ID,
+    company_id: COMPANY_ID,
+    status: "claimed",
+    worker_identity: worker,
+  });
 }
 
 describe("complete/fail discovery company run schemas", () => {
@@ -157,143 +229,184 @@ describe("complete/fail discovery company run schemas", () => {
       }),
     ).toThrow();
   });
-
-  it("rejects empty worker_identity", () => {
-    expect(() =>
-      completeDiscoveryCompanyRunSchema.parse({
-        run_id: RUN_ID,
-        worker_identity: "",
-        success: true,
-      }),
-    ).toThrow();
-  });
 });
 
 describe("complete/fail SQL ownership contracts", () => {
-  it("gates run updates on claimed status and matching worker_identity", () => {
-    expect(completeSrc).toMatch(
-      /WHERE id = \$\{input\.run_id\}::uuid[\s\S]*AND status = 'claimed'[\s\S]*AND worker_identity = \$\{workerIdentity\}/,
-    );
-    expect(failSrc).toMatch(
-      /WHERE id = \$\{input\.run_id\}::uuid[\s\S]*AND status = 'claimed'[\s\S]*AND worker_identity = \$\{workerIdentity\}/,
-    );
+  it("locks eligible ownership before either lifecycle update", () => {
+    for (const src of [completeSrc, failSrc]) {
+      expect(src).toContain("WITH eligible AS");
+      expect(src).toContain("FOR UPDATE OF r, c");
+      expect(src).toContain("c.active_run_id = r.id");
+      expect(src).toContain("r.status = 'claimed'");
+      expect(src).toContain("r.worker_identity = ${workerIdentity}");
+      const eligibleIdx = src.indexOf("WITH eligible AS");
+      const doneIdx = src.indexOf("done AS");
+      const companyIdx = src.indexOf("company AS");
+      expect(eligibleIdx).toBeGreaterThanOrEqual(0);
+      expect(doneIdx).toBeGreaterThan(eligibleIdx);
+      expect(companyIdx).toBeGreaterThan(doneIdx);
+    }
   });
 
-  it("clears company lease only when active_run_id still references the run", () => {
-    expect(completeSrc).toContain("AND c.active_run_id = d.id");
-    expect(failSrc).toContain("AND c.active_run_id = d.id");
-    expect(completeSrc).toContain("WHERE EXISTS (SELECT 1 FROM company)");
-    expect(failSrc).toContain("WHERE EXISTS (SELECT 1 FROM company)");
-  });
-
-  it("rejects owner mismatch and non-claimable statuses without treating them as success", () => {
-    expect(completeSrc).toContain("discovery_company_run_owner_mismatch");
-    expect(failSrc).toContain("discovery_company_run_owner_mismatch");
-    expect(completeSrc).toContain("discovery_company_run_not_claimable:");
-    expect(failSrc).toContain("discovery_company_run_not_claimable:");
-    expect(completeSrc).toContain("discovery_company_run_lease_not_active");
-    expect(failSrc).toContain("discovery_company_run_lease_not_active");
+  it("drives both mutations from eligible and aborts on partial counts", () => {
+    for (const src of [completeSrc, failSrc]) {
+      expect(src).toMatch(/FROM eligible e[\s\S]*WHERE r\.id = e\.run_id/);
+      expect(src).toMatch(
+        /FROM eligible e[\s\S]*WHERE c\.id = e\.company_id[\s\S]*c\.active_run_id = e\.run_id/,
+      );
+      expect(src).toContain("assert_atomic");
+      expect(src).toContain("(1 / 0)::boolean");
+      // Must not update company FROM done (old partial-commit pattern).
+      const companyCte = src.slice(src.indexOf("company AS"), src.indexOf("assert_atomic"));
+      expect(companyCte).toContain("FROM eligible e");
+      expect(companyCte).not.toContain("FROM done");
+    }
   });
 });
 
-describe("owned company-run lifecycle simulation", () => {
-  it("correct owner completes a run", () => {
-    const { companies, runs } = seedClaimed();
-    const result = finishOwnedRun(companies, runs, {
-      runId: RUN_ID,
-      workerIdentity: "github-actions",
-      mode: "completed",
+describe("completeDiscoveryCompanyRun / failDiscoveryCompanyRun behavior", () => {
+  beforeEach(() => {
+    seedClaimed();
+    txCalls.count = 0;
+  });
+
+  it("correct owner completes a run and clears the lease", async () => {
+    const result = await completeDiscoveryCompanyRun({
+      run_id: RUN_ID,
+      worker_identity: "github-actions",
+      success: true,
+      metrics: {},
     });
-    expect(result).toEqual({ ok: true, idempotent_replay: false });
+    expect(result.ok).toBe(true);
+    expect(result.idempotent_replay).toBe(false);
     expect(runs.get(RUN_ID)?.status).toBe("completed");
     expect(companies.get(COMPANY_ID)?.active_run_id).toBeNull();
   });
 
-  it("correct owner fails a run", () => {
-    const { companies, runs } = seedClaimed();
-    const result = finishOwnedRun(companies, runs, {
-      runId: RUN_ID,
-      workerIdentity: "github-actions",
-      mode: "failed",
+  it("correct owner fails a run and clears the lease", async () => {
+    const result = await failDiscoveryCompanyRun({
+      run_id: RUN_ID,
+      worker_identity: "github-actions",
+      error_category: "unknown",
+      error_summary: "boom",
+      metrics: {},
     });
-    expect(result).toEqual({ ok: true, idempotent_replay: false });
+    expect(result.ok).toBe(true);
+    expect(result.idempotent_replay).toBe(false);
     expect(runs.get(RUN_ID)?.status).toBe("failed");
     expect(companies.get(COMPANY_ID)?.active_run_id).toBeNull();
     expect(companies.get(COMPANY_ID)?.consecutive_failures).toBe(1);
   });
 
-  it("wrong worker identity is rejected and the lease remains unchanged", () => {
-    const { companies, runs } = seedClaimed("owner-a");
-    const before = structuredClone({
-      company: companies.get(COMPANY_ID),
-      run: runs.get(RUN_ID),
-    });
-    const result = finishOwnedRun(companies, runs, {
-      runId: RUN_ID,
-      workerIdentity: "intruder",
-      mode: "completed",
-    });
-    expect(result).toEqual({ error: "discovery_company_run_owner_mismatch" });
-    expect(companies.get(COMPANY_ID)).toEqual(before.company);
-    expect(runs.get(RUN_ID)).toEqual(before.run);
+  it("rejects missing worker identity before mutation", async () => {
+    const before = snapshotState();
+    await expect(
+      completeDiscoveryCompanyRun({
+        run_id: RUN_ID,
+        worker_identity: "   ",
+        success: true,
+        metrics: {},
+      }),
+    ).rejects.toThrow(/worker_identity_required/);
+    expect(snapshotState()).toEqual(before);
   });
 
-  it("same-owner idempotent replay succeeds without changing terminal state twice", () => {
-    const { companies, runs } = seedClaimed();
-    expect(
-      finishOwnedRun(companies, runs, {
-        runId: RUN_ID,
-        workerIdentity: "github-actions",
-        mode: "completed",
+  it("rejects wrong worker identity and leaves the lease unchanged", async () => {
+    const before = snapshotState();
+    await expect(
+      completeDiscoveryCompanyRun({
+        run_id: RUN_ID,
+        worker_identity: "intruder",
+        success: true,
+        metrics: {},
       }),
-    ).toEqual({ ok: true, idempotent_replay: false });
-    const afterFirst = structuredClone({
-      company: companies.get(COMPANY_ID),
-      run: runs.get(RUN_ID),
-    });
-    expect(
-      finishOwnedRun(companies, runs, {
-        runId: RUN_ID,
-        workerIdentity: "github-actions",
-        mode: "completed",
-      }),
-    ).toEqual({ ok: true, idempotent_replay: true });
-    expect(companies.get(COMPANY_ID)).toEqual(afterFirst.company);
-    expect(runs.get(RUN_ID)).toEqual(afterFirst.run);
+    ).rejects.toThrow(/owner_mismatch/);
+    expect(snapshotState()).toEqual(before);
+    expect(txCalls.count).toBe(0);
   });
 
-  it("stale lease recovery then late worker response does not overwrite newer state", () => {
-    const { companies, runs } = seedClaimed("stale-worker");
-    expect(recoverStale(companies, runs, RUN_ID)).toBe(true);
-    expect(runs.get(RUN_ID)?.status).toBe("expired");
-    expect(companies.get(COMPANY_ID)?.active_run_id).toBeNull();
+  it("same-owner idempotent replay succeeds without a second mutation", async () => {
+    await completeDiscoveryCompanyRun({
+      run_id: RUN_ID,
+      worker_identity: "github-actions",
+      success: true,
+      metrics: {},
+    });
+    const afterFirst = snapshotState();
+    const txAfterFirst = txCalls.count;
+    const again = await completeDiscoveryCompanyRun({
+      run_id: RUN_ID,
+      worker_identity: "github-actions",
+      success: true,
+      metrics: {},
+    });
+    expect(again.idempotent_replay).toBe(true);
+    expect(snapshotState()).toEqual(afterFirst);
+    expect(txCalls.count).toBe(txAfterFirst);
+  });
 
-    // Newer claim by another worker.
-    const newRunId = "33333333-3333-3333-3333-333333333333";
-    runs.set(newRunId, {
-      id: newRunId,
+  it("rejects claimed run when company active_run_id no longer references it (no partial terminal)", async () => {
+    // Run still claimed, but lease was recovered/replaced.
+    companies.get(COMPANY_ID)!.active_run_id = OTHER_RUN_ID;
+    runs.set(OTHER_RUN_ID, {
+      id: OTHER_RUN_ID,
       company_id: COMPANY_ID,
       status: "claimed",
       worker_identity: "fresh-worker",
     });
-    companies.get(COMPANY_ID)!.active_run_id = newRunId;
+    const before = snapshotState();
 
-    const before = structuredClone({
-      company: companies.get(COMPANY_ID),
-      stale: runs.get(RUN_ID),
-      fresh: runs.get(newRunId),
-    });
+    await expect(
+      completeDiscoveryCompanyRun({
+        run_id: RUN_ID,
+        worker_identity: "github-actions",
+        success: true,
+        metrics: {},
+      }),
+    ).rejects.toThrow(/lease_not_active/);
 
-    const late = finishOwnedRun(companies, runs, {
-      runId: RUN_ID,
-      workerIdentity: "stale-worker",
-      mode: "completed",
+    expect(snapshotState()).toEqual(before);
+    expect(runs.get(RUN_ID)?.status).toBe("claimed");
+    expect(companies.get(COMPANY_ID)?.active_run_id).toBe(OTHER_RUN_ID);
+    expect(txCalls.count).toBe(0);
+  });
+
+  it("stale recovery then late worker response does not overwrite newer state", async () => {
+    // Expire original claim.
+    runs.get(RUN_ID)!.status = "expired";
+    companies.get(COMPANY_ID)!.active_run_id = OTHER_RUN_ID;
+    runs.set(OTHER_RUN_ID, {
+      id: OTHER_RUN_ID,
+      company_id: COMPANY_ID,
+      status: "claimed",
+      worker_identity: "fresh-worker",
     });
-    expect(late).toEqual({
-      error: "discovery_company_run_not_claimable:expired",
-    });
-    expect(companies.get(COMPANY_ID)).toEqual(before.company);
-    expect(runs.get(RUN_ID)).toEqual(before.stale);
-    expect(runs.get(newRunId)).toEqual(before.fresh);
+    const before = snapshotState();
+
+    await expect(
+      completeDiscoveryCompanyRun({
+        run_id: RUN_ID,
+        worker_identity: "github-actions",
+        success: true,
+        metrics: {},
+      }),
+    ).rejects.toThrow(/not_claimable:expired/);
+
+    expect(snapshotState()).toEqual(before);
+  });
+
+  it("rejects cross-operation replay of a failed run via complete", async () => {
+    runs.get(RUN_ID)!.status = "failed";
+    companies.get(COMPANY_ID)!.active_run_id = null;
+    const before = snapshotState();
+    await expect(
+      completeDiscoveryCompanyRun({
+        run_id: RUN_ID,
+        worker_identity: "github-actions",
+        success: true,
+        metrics: {},
+      }),
+    ).rejects.toThrow(/not_claimable:failed/);
+    expect(snapshotState()).toEqual(before);
   });
 });

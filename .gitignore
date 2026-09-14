@@ -32,3 +32,11 @@ Thumbs.db
 .vscode/*
 !.vscode/mcp.json
 !.vscode/settings.json
+.vercel
+.env*
+
+# local rollout secrets (never commit)
+remote_mcp/.env.database_url.runtime
+remote_mcp/.env.vercel.production
+remote_mcp/.env.database_url.only
+remote_mcp/env_get_err.txt

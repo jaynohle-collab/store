@@ -399,10 +399,10 @@ export async function completeDiscoveryCompanyRun(
   const priority = String(prior.scan_priority || "normal") as ScanPriority;
   const next = computeNextEligibleAt({ priority, success: input.success });
 
-  // Lock ownership first. Both mutations are driven only from that locked set so a
-  // missing company match cannot leave a terminal run while the lease stays active.
-  // If either mutation count mismatches eligible, abort the statement (1/0) so CTE
-  // side effects do not commit.
+  // Lock ownership first. Both mutations are driven only from that locked eligible
+  // set (FOR UPDATE of run + company). With a single-row PK lock and both UPDATEs
+  // sourced from eligible, either both affect one row or neither does — statement
+  // atomicity provides all-or-nothing without a planner-unsafe constant fault.
   const results = await sql.transaction([
     sql`
       WITH eligible AS (
@@ -446,20 +446,10 @@ export async function completeDiscoveryCompanyRun(
         WHERE c.id = e.company_id
           AND c.active_run_id = e.run_id
         RETURNING c.id
-      ),
-      assert_atomic AS (
-        SELECT CASE
-          WHEN (SELECT COUNT(*)::int FROM eligible) = 0 THEN TRUE
-          WHEN (SELECT COUNT(*)::int FROM done) = 1
-           AND (SELECT COUNT(*)::int FROM company) = 1 THEN TRUE
-          ELSE (1 / 0)::boolean
-        END AS ok
       )
       SELECT d.*
       FROM done d
-      CROSS JOIN assert_atomic a
-      WHERE a.ok
-        AND EXISTS (SELECT 1 FROM company)
+      WHERE EXISTS (SELECT 1 FROM company)
     `,
   ]);
   const rows = results[0] ?? [];
@@ -550,6 +540,9 @@ export async function failDiscoveryCompanyRun(
     consecutiveFailures: failures,
   });
 
+  // Same ownership lock + dual UPDATE-from-eligible pattern as complete.
+  // Atomicity comes from the locked eligible set + statement CTE semantics —
+  // not from a planner-unsafe constant division fault.
   const results = await sql.transaction([
     sql`
       WITH eligible AS (
@@ -593,20 +586,10 @@ export async function failDiscoveryCompanyRun(
         WHERE c.id = e.company_id
           AND c.active_run_id = e.run_id
         RETURNING c.id
-      ),
-      assert_atomic AS (
-        SELECT CASE
-          WHEN (SELECT COUNT(*)::int FROM eligible) = 0 THEN TRUE
-          WHEN (SELECT COUNT(*)::int FROM done) = 1
-           AND (SELECT COUNT(*)::int FROM company) = 1 THEN TRUE
-          ELSE (1 / 0)::boolean
-        END AS ok
       )
       SELECT d.*
       FROM done d
-      CROSS JOIN assert_atomic a
-      WHERE a.ok
-        AND EXISTS (SELECT 1 FROM company)
+      WHERE EXISTS (SELECT 1 FROM company)
     `,
   ]);
   const rows = results[0] ?? [];

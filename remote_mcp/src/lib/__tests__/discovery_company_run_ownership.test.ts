@@ -248,16 +248,18 @@ describe("complete/fail SQL ownership contracts", () => {
     }
   });
 
-  it("drives both mutations from eligible and aborts on partial counts", () => {
+  it("drives both mutations from eligible without constant 1/0 assertion", () => {
     for (const src of [completeSrc, failSrc]) {
       expect(src).toMatch(/FROM eligible e[\s\S]*WHERE r\.id = e\.run_id/);
       expect(src).toMatch(
         /FROM eligible e[\s\S]*WHERE c\.id = e\.company_id[\s\S]*c\.active_run_id = e\.run_id/,
       );
-      expect(src).toContain("assert_atomic");
-      expect(src).toContain("(1 / 0)::boolean");
+      expect(src).not.toContain("assert_atomic");
+      expect(src).not.toMatch(/\(1\s*\/\s*0\)/);
       // Must not update company FROM done (old partial-commit pattern).
-      const companyCte = src.slice(src.indexOf("company AS"), src.indexOf("assert_atomic"));
+      const companyStart = src.indexOf("company AS");
+      const selectStart = src.indexOf("SELECT d.*", companyStart);
+      const companyCte = src.slice(companyStart, selectStart);
       expect(companyCte).toContain("FROM eligible e");
       expect(companyCte).not.toContain("FROM done");
     }

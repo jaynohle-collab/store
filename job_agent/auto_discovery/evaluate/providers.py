@@ -66,6 +66,9 @@ def _raise_for_provider_http(provider: str, status: int, body: str) -> None:
         raise QuotaExhaustedError(f"{provider} HTTP {status}")
     if status in {500, 502, 503, 504}:
         raise TransientProviderError(f"{provider} HTTP {status}")
+    if status == 404:
+        # Model id unavailable / renamed — try next provider when configured.
+        raise TransientProviderError(f"{provider} HTTP 404")
     if status >= 400:
         raise AdapterError(
             f"{provider} HTTP {status}",
@@ -147,11 +150,16 @@ class GeminiProvider(EvaluationProvider):
     def __init__(
         self,
         api_key: str,
-        model: str = "gemini-2.0-flash",
+        model: str | None = None,
         transport: httpx.BaseTransport | None = None,
     ):
         self.api_key = api_key
-        self.model = model
+        # Free-tier default: gemini-2.5-flash (gemini-2.0-flash returns 404 for many keys).
+        self.model = (
+            model
+            or (os.environ.get("GEMINI_MODEL") or "").strip()
+            or "gemini-2.5-flash"
+        )
         self._transport = transport
 
     def complete_json(

@@ -122,6 +122,27 @@ describe("automatic-job-discovery workflow contract", () => {
     expect(workflowYaml).not.toContain("jobs:delete");
     expect(workflowYaml).not.toContain("jobs:revert");
   });
+
+  it("passes repository limit variables into the producer env", () => {
+    expect(workflowYaml).toContain(
+      "AUTO_DISCOVERY_MAX_COMPANIES: ${{ github.event.inputs.max_companies || vars.AUTO_DISCOVERY_MAX_COMPANIES || '10' }}",
+    );
+    expect(workflowYaml).toContain(
+      "AUTO_DISCOVERY_MAX_CANDIDATES_PER_COMPANY: ${{ vars.AUTO_DISCOVERY_MAX_CANDIDATES_PER_COMPANY || '100' }}",
+    );
+    expect(workflowYaml).toContain(
+      "AUTO_DISCOVERY_MAX_EVALS_PER_RUN: ${{ vars.AUTO_DISCOVERY_MAX_EVALS_PER_RUN || '50' }}",
+    );
+    expect(workflowYaml).toContain(
+      "AUTO_DISCOVERY_MAX_BATCHES_PER_RUN: ${{ vars.AUTO_DISCOVERY_MAX_BATCHES_PER_RUN || '10' }}",
+    );
+    expect(workflowYaml).toContain(
+      "AUTO_DISCOVERY_MAX_JOBS_PER_BATCH: ${{ vars.AUTO_DISCOVERY_MAX_JOBS_PER_BATCH || '25' }}",
+    );
+    expect(workflowYaml).toContain(
+      "GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-2.5-flash' }}",
+    );
+  });
 });
 
 describe("Milestone 5 MCP permissions (migration companion)", () => {

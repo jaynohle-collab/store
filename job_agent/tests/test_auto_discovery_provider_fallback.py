@@ -10,8 +10,10 @@ from unittest import mock
 from job_agent.auto_discovery.evaluate.providers import (
     AllProvidersUnavailableError,
     FallbackEvaluationProvider,
+    GeminiProvider,
     QuotaExhaustedError,
     TransientProviderError,
+    _raise_for_provider_http,
     configured_providers,
     resolve_provider,
 )
@@ -118,6 +120,28 @@ class ProviderFallbackTests(unittest.TestCase):
             names = [p.name for p in configured_providers()]
             self.assertEqual(names, ["gemini", "groq", "openai"])
 
+    def test_gemini_http_404_is_transient_for_bounded_fallback(self):
+        with self.assertRaises(TransientProviderError):
+            _raise_for_provider_http("gemini", 404, "model not found")
+        first = SeqProvider("gemini", [TransientProviderError("gemini HTTP 404")])
+        second = SeqProvider("groq", [], success=OK_PAYLOAD)
+        chain = FallbackEvaluationProvider([first, second])  # type: ignore[list-item]
+        out = chain.complete_json(system="s", user="u", schema={})
+        self.assertEqual(out["gpt_decision"], "QUALIFIED")
+        self.assertEqual(first.calls, 1)
+        self.assertEqual(second.calls, 1)
+
+    def test_gemini_model_defaults_to_free_tier_flash(self):
+        with mock.patch.dict(os.environ, {"GEMINI_MODEL": ""}, clear=False):
+            os.environ.pop("GEMINI_MODEL", None)
+            provider = GeminiProvider("test-key")
+            self.assertEqual(provider.model, "gemini-2.5-flash")
+        with mock.patch.dict(
+            os.environ, {"GEMINI_MODEL": "gemini-2.0-flash-lite"}, clear=False
+        ):
+            provider = GeminiProvider("test-key")
+            self.assertEqual(provider.model, "gemini-2.0-flash-lite")
+
 
 class PendingPreservationPipelineTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
@@ -131,6 +155,35 @@ class PendingPreservationPipelineTests(unittest.IsolatedAsyncioTestCase):
             location="Remote - United States",
             description="Build production LLM agents and platforms.",
         )
+
+    async def test_gemini_404_all_providers_down_preserves_candidate(self):
+        store = FakeStore()
+        store.pending = []  # type: ignore[attr-defined]
+
+        async def preserve(payload):
+            store.calls.append(("preserve_pending_discovery_evaluations", dict(payload)))
+            for item in payload.get("items") or []:
+                store.pending.append(
+                    {**item, "id": f"pend-{len(store.pending)+1}", "status": "pending"}
+                )
+            return {"ok": True, "saved_count": len(payload.get("items") or [])}
+
+        store.preserve_pending_discovery_evaluations = preserve  # type: ignore[method-assign]
+        chain = FallbackEvaluationProvider(
+            [SeqProvider("gemini", [TransientProviderError("gemini HTTP 404")])]  # type: ignore[list-item]
+        )
+        pipeline = AutomaticDiscoveryPipeline(
+            store,
+            provider=chain,
+            limits=DiscoveryLimits(max_companies=1, max_evals_per_run=5),
+        )
+        with mock.patch(
+            "job_agent.auto_discovery.pipeline.get_adapter",
+            return_value=FakeAdapter([self.cand]),
+        ):
+            metrics = await pipeline.run()
+        self.assertEqual(metrics.batches_submitted, 0)
+        self.assertEqual(len(store.pending), 1)
 
     async def test_all_providers_down_preserves_and_resumes_without_duplicate_eval(self):
         store = FakeStore()

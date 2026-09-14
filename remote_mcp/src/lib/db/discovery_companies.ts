@@ -77,8 +77,7 @@ export const completeDiscoveryCompanyRunSchema = z
     run_id: z.string().uuid(),
     metrics: z.record(z.string(), z.unknown()).optional().default({}),
     success: z.boolean().default(true),
-    // Accepted and ignored: workers may echo identity; lease ownership is run_id-based.
-    worker_identity: z.string().min(1).max(128).optional(),
+    worker_identity: z.string().min(1).max(128),
   })
   .strict();
 
@@ -100,8 +99,7 @@ export const failDiscoveryCompanyRunSchema = z
       .default("unknown"),
     error_summary: z.string().max(1000),
     metrics: z.record(z.string(), z.unknown()).optional().default({}),
-    // Accepted and ignored: workers may echo identity; lease ownership is run_id-based.
-    worker_identity: z.string().min(1).max(128).optional(),
+    worker_identity: z.string().min(1).max(128),
   })
   .strict();
 
@@ -360,9 +358,13 @@ export async function completeDiscoveryCompanyRun(
   const input = completeDiscoveryCompanyRunSchema.parse(raw);
   const sql = getTransactionalSql();
   const metricsJson = JSON.stringify(input.metrics || {});
+  const workerIdentity = input.worker_identity.trim();
+  if (!workerIdentity) {
+    throw new Error("discovery_company_run_worker_identity_required");
+  }
 
   const existing = await getSql()`
-    SELECT r.*, c.scan_priority
+    SELECT r.*, c.scan_priority, c.active_run_id AS company_active_run_id
     FROM discovery_company_runs r
     JOIN discovery_companies c ON c.id = r.company_id
     WHERE r.id = ${input.run_id}::uuid
@@ -371,8 +373,27 @@ export async function completeDiscoveryCompanyRun(
     throw new Error(`discovery company run not found: ${input.run_id}`);
   }
   const prior = (existing as Record<string, unknown>[])[0];
-  if (String(prior.status) !== "claimed") {
+  const priorStatus = String(prior.status);
+  const priorWorker = String(prior.worker_identity || "");
+
+  if (priorStatus === "completed") {
+    if (priorWorker !== workerIdentity) {
+      throw new Error("discovery_company_run_owner_mismatch");
+    }
     return { ok: true, idempotent_replay: true, run: mapRow(prior) };
+  }
+
+  if (priorStatus !== "claimed") {
+    // Expired / failed / recovered — late worker must not overwrite newer state.
+    throw new Error(`discovery_company_run_not_claimable:${priorStatus}`);
+  }
+
+  if (priorWorker !== workerIdentity) {
+    throw new Error("discovery_company_run_owner_mismatch");
+  }
+
+  if (String(prior.company_active_run_id || "") !== input.run_id) {
+    throw new Error("discovery_company_run_lease_not_active");
   }
 
   const priority = String(prior.scan_priority || "normal") as ScanPriority;
@@ -386,7 +407,9 @@ export async function completeDiscoveryCompanyRun(
             completed_at = NOW(),
             metrics = ${metricsJson}::jsonb,
             updated_at = NOW()
-        WHERE id = ${input.run_id}::uuid AND status = 'claimed'
+        WHERE id = ${input.run_id}::uuid
+          AND status = 'claimed'
+          AND worker_identity = ${workerIdentity}
         RETURNING *
       ),
       company AS (
@@ -403,21 +426,35 @@ export async function completeDiscoveryCompanyRun(
             updated_at = NOW()
         FROM done d
         WHERE c.id = d.company_id
+          AND c.active_run_id = d.id
         RETURNING c.id
       )
-      SELECT d.* FROM done d
+      SELECT d.*
+      FROM done d
+      WHERE EXISTS (SELECT 1 FROM company)
     `,
   ]);
   const rows = results[0] ?? [];
   if (!rows.length) {
     const again = await getSql()`
-      SELECT * FROM discovery_company_runs WHERE id = ${input.run_id}::uuid
+      SELECT r.*, c.active_run_id AS company_active_run_id
+      FROM discovery_company_runs r
+      JOIN discovery_companies c ON c.id = r.company_id
+      WHERE r.id = ${input.run_id}::uuid
     `;
-    return {
-      ok: true,
-      idempotent_replay: true,
-      run: mapRow((again as Record<string, unknown>[])[0]),
-    };
+    const row = (again as Record<string, unknown>[])[0];
+    if (!row) {
+      throw new Error(`discovery company run not found: ${input.run_id}`);
+    }
+    const status = String(row.status);
+    const owner = String(row.worker_identity || "");
+    if (status === "completed" && owner === workerIdentity) {
+      return { ok: true, idempotent_replay: true, run: mapRow(row) };
+    }
+    if (status === "claimed" && owner !== workerIdentity) {
+      throw new Error("discovery_company_run_owner_mismatch");
+    }
+    throw new Error(`discovery_company_run_not_claimable:${status}`);
   }
   return {
     ok: true,
@@ -434,9 +471,13 @@ export async function failDiscoveryCompanyRun(
   const summary = sanitizeErrorSummary(input.error_summary);
   const sql = getTransactionalSql();
   const metricsJson = JSON.stringify(input.metrics || {});
+  const workerIdentity = input.worker_identity.trim();
+  if (!workerIdentity) {
+    throw new Error("discovery_company_run_worker_identity_required");
+  }
 
   const existing = await getSql()`
-    SELECT r.*, c.scan_priority, c.consecutive_failures
+    SELECT r.*, c.scan_priority, c.consecutive_failures, c.active_run_id AS company_active_run_id
     FROM discovery_company_runs r
     JOIN discovery_companies c ON c.id = r.company_id
     WHERE r.id = ${input.run_id}::uuid
@@ -445,8 +486,26 @@ export async function failDiscoveryCompanyRun(
     throw new Error(`discovery company run not found: ${input.run_id}`);
   }
   const prior = (existing as Record<string, unknown>[])[0];
-  if (String(prior.status) !== "claimed") {
+  const priorStatus = String(prior.status);
+  const priorWorker = String(prior.worker_identity || "");
+
+  if (priorStatus === "failed") {
+    if (priorWorker !== workerIdentity) {
+      throw new Error("discovery_company_run_owner_mismatch");
+    }
     return { ok: true, idempotent_replay: true, run: mapRow(prior) };
+  }
+
+  if (priorStatus !== "claimed") {
+    throw new Error(`discovery_company_run_not_claimable:${priorStatus}`);
+  }
+
+  if (priorWorker !== workerIdentity) {
+    throw new Error("discovery_company_run_owner_mismatch");
+  }
+
+  if (String(prior.company_active_run_id || "") !== input.run_id) {
+    throw new Error("discovery_company_run_lease_not_active");
   }
 
   const failures = Number(prior.consecutive_failures || 0) + 1;
@@ -467,7 +526,9 @@ export async function failDiscoveryCompanyRun(
             error_summary = ${summary},
             metrics = ${metricsJson}::jsonb,
             updated_at = NOW()
-        WHERE id = ${input.run_id}::uuid AND status = 'claimed'
+        WHERE id = ${input.run_id}::uuid
+          AND status = 'claimed'
+          AND worker_identity = ${workerIdentity}
         RETURNING *
       ),
       company AS (
@@ -482,21 +543,34 @@ export async function failDiscoveryCompanyRun(
             updated_at = NOW()
         FROM done d
         WHERE c.id = d.company_id
+          AND c.active_run_id = d.id
         RETURNING c.id
       )
-      SELECT d.* FROM done d
+      SELECT d.*
+      FROM done d
+      WHERE EXISTS (SELECT 1 FROM company)
     `,
   ]);
   const rows = results[0] ?? [];
   if (!rows.length) {
     const again = await getSql()`
-      SELECT * FROM discovery_company_runs WHERE id = ${input.run_id}::uuid
+      SELECT r.*
+      FROM discovery_company_runs r
+      WHERE r.id = ${input.run_id}::uuid
     `;
-    return {
-      ok: true,
-      idempotent_replay: true,
-      run: mapRow((again as Record<string, unknown>[])[0]),
-    };
+    const row = (again as Record<string, unknown>[])[0];
+    if (!row) {
+      throw new Error(`discovery company run not found: ${input.run_id}`);
+    }
+    const status = String(row.status);
+    const owner = String(row.worker_identity || "");
+    if (status === "failed" && owner === workerIdentity) {
+      return { ok: true, idempotent_replay: true, run: mapRow(row) };
+    }
+    if (status === "claimed" && owner !== workerIdentity) {
+      throw new Error("discovery_company_run_owner_mismatch");
+    }
+    throw new Error(`discovery_company_run_not_claimable:${status}`);
   }
   return {
     ok: true,

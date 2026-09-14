@@ -1,0 +1,213 @@
+name: Gemini API Probe
+
+# Manual-only diagnostic: list Gemini models that support generateContent and
+# optionally probe gemini-2.5-flash. Read-only against Google Generative Language.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Probe Gemini listModels and generateContent
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GEMINI_API_KEY}" ]; then
+            echo "GEMINI_API_KEY is not configured"
+            exit 1
+          fi
+          # Never echo the secret, headers, or full provider payloads.
+          python3 <<'PY'
+          from __future__ import annotations
+
+          import json
+          import os
+          import re
+          import sys
+          import urllib.error
+          import urllib.request
+
+          BASE = "https://generativelanguage.googleapis.com/v1beta"
+          PREFERRED = "gemini-2.5-flash"
+          KEY = (os.environ.get("GEMINI_API_KEY") or "").strip()
+
+
+          def sanitize_message(message: str) -> str:
+              text = " ".join((message or "").split())
+              text = re.sub(r"AIza[0-9A-Za-z_-]{10,}", "[redacted]", text)
+              text = re.sub(r"(?i)(api[_-]?key|authorization|bearer)\s*[:=]\s*\S+", r"\1=[redacted]", text)
+              return text[:240]
+
+
+          def parse_google_error(body: str) -> tuple[str, str]:
+              try:
+                  payload = json.loads(body)
+              except json.JSONDecodeError:
+                  return "unknown", sanitize_message(body[:120])
+              err = payload.get("error") if isinstance(payload, dict) else None
+              if not isinstance(err, dict):
+                  return "unknown", "unparseable_error"
+              code = err.get("status") or err.get("code") or "unknown"
+              message = sanitize_message(str(err.get("message") or ""))
+              return str(code), message or "empty_message"
+
+
+          def request(method: str, url: str, payload: dict | None = None) -> tuple[int, str]:
+              data = None if payload is None else json.dumps(payload).encode("utf-8")
+              req = urllib.request.Request(
+                  url,
+                  data=data,
+                  method=method,
+                  headers={
+                      "x-goog-api-key": KEY,
+                      "Content-Type": "application/json",
+                  },
+              )
+              try:
+                  with urllib.request.urlopen(req, timeout=30) as resp:
+                      return int(resp.status), resp.read().decode("utf-8", errors="replace")
+              except urllib.error.HTTPError as exc:
+                  body = exc.read().decode("utf-8", errors="replace")
+                  return int(exc.code), body
+
+
+          def report(
+              *,
+              http_status: int,
+              selected_model: str,
+              usable_text: bool,
+              error_code: str = "",
+              error_message: str = "",
+          ) -> None:
+              print(f"http_status={http_status}")
+              print(f"selected_model={selected_model}")
+              print(f"usable_text={'yes' if usable_text else 'no'}")
+              if error_code or error_message:
+                  print(f"google_error_code={error_code or 'none'}")
+                  print(f"google_error_message={error_message or 'none'}")
+
+
+          if not KEY:
+              report(
+                  http_status=0,
+                  selected_model="none",
+                  usable_text=False,
+                  error_code="missing_secret",
+                  error_message="GEMINI_API_KEY is empty",
+              )
+              sys.exit(1)
+
+          list_status, list_body = request("GET", f"{BASE}/models")
+          if list_status != 200:
+              code, message = parse_google_error(list_body)
+              report(
+                  http_status=list_status,
+                  selected_model="none",
+                  usable_text=False,
+                  error_code=code,
+                  error_message=message,
+              )
+              sys.exit(1)
+
+          try:
+              listed = json.loads(list_body)
+          except json.JSONDecodeError:
+              report(
+                  http_status=list_status,
+                  selected_model="none",
+                  usable_text=False,
+                  error_code="invalid_json",
+                  error_message="listModels response was not JSON",
+              )
+              sys.exit(1)
+
+          models = listed.get("models") if isinstance(listed, dict) else None
+          if not isinstance(models, list):
+              report(
+                  http_status=list_status,
+                  selected_model="none",
+                  usable_text=False,
+                  error_code="unexpected_shape",
+                  error_message="listModels missing models array",
+              )
+              sys.exit(1)
+
+          generate_content_names: list[str] = []
+          for item in models:
+              if not isinstance(item, dict):
+                  continue
+              methods = item.get("supportedGenerationMethods") or []
+              if "generateContent" not in methods:
+                  continue
+              name = str(item.get("name") or "")
+              short = name.split("/", 1)[-1] if name else ""
+              if short:
+                  generate_content_names.append(short)
+
+          print("generateContent_models:")
+          for name in generate_content_names:
+              print(f"- {name}")
+
+          if PREFERRED not in generate_content_names:
+              report(
+                  http_status=list_status,
+                  selected_model="none",
+                  usable_text=False,
+                  error_code="preferred_model_missing",
+                  error_message=f"{PREFERRED} not listed for generateContent",
+              )
+              sys.exit(1)
+
+          gen_status, gen_body = request(
+              "POST",
+              f"{BASE}/models/{PREFERRED}:generateContent",
+              {
+                  "contents": [
+                      {
+                          "role": "user",
+                          "parts": [{"text": "Reply with exactly: ok"}],
+                      }
+                  ]
+              },
+          )
+          if gen_status != 200:
+              code, message = parse_google_error(gen_body)
+              report(
+                  http_status=gen_status,
+                  selected_model=PREFERRED,
+                  usable_text=False,
+                  error_code=code,
+                  error_message=message,
+              )
+              sys.exit(1)
+
+          usable = False
+          try:
+              gen_payload = json.loads(gen_body)
+              for candidate in gen_payload.get("candidates") or []:
+                  content = candidate.get("content") or {}
+                  for part in content.get("parts") or []:
+                      text = part.get("text")
+                      if isinstance(text, str) and text.strip():
+                          usable = True
+                          break
+                  if usable:
+                      break
+          except (json.JSONDecodeError, AttributeError, TypeError):
+              usable = False
+
+          report(
+              http_status=gen_status,
+              selected_model=PREFERRED,
+              usable_text=usable,
+              error_code="" if usable else "empty_candidates",
+              error_message="" if usable else "generateContent returned no usable text",
+          )
+          sys.exit(0 if usable else 1)
+          PY

@@ -1,0 +1,34 @@
+name: Gemini API Probe
+
+# Manual-only diagnostic: list Gemini models that support generateContent and
+# optionally probe gemini-2.5-flash. Read-only against Google Generative Language.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Probe Gemini listModels and generateContent
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GEMINI_API_KEY}" ]; then
+            echo "GEMINI_API_KEY is not configured"
+            exit 1
+          fi
+          # Never echo the secret, headers, or full provider payloads.
+          python -m job_agent.examples.gemini_api_probe

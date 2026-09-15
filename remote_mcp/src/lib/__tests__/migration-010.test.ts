@@ -140,7 +140,7 @@ describe("automatic-job-discovery workflow contract", () => {
       "AUTO_DISCOVERY_MAX_JOBS_PER_BATCH: ${{ vars.AUTO_DISCOVERY_MAX_JOBS_PER_BATCH || '25' }}",
     );
     expect(workflowYaml).toContain(
-      "GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-2.5-flash' }}",
+      "GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.6-flash' }}",
     );
   });
 });

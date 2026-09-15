@@ -131,11 +131,11 @@ class ProviderFallbackTests(unittest.TestCase):
         self.assertEqual(first.calls, 1)
         self.assertEqual(second.calls, 1)
 
-    def test_gemini_model_defaults_to_free_tier_flash(self):
+    def test_gemini_model_defaults_to_3_6_flash(self):
         with mock.patch.dict(os.environ, {"GEMINI_MODEL": ""}, clear=False):
             os.environ.pop("GEMINI_MODEL", None)
             provider = GeminiProvider("test-key")
-            self.assertEqual(provider.model, "gemini-2.5-flash")
+            self.assertEqual(provider.model, "gemini-3.6-flash")
         with mock.patch.dict(
             os.environ, {"GEMINI_MODEL": "gemini-2.0-flash-lite"}, clear=False
         ):

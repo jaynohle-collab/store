@@ -46,7 +46,7 @@ jobs:
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-2.5-flash' }}
+      GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.6-flash' }}
       AUTO_DISCOVERY_WORKER_IDENTITY: github-actions
       AUTO_DISCOVERY_MAX_COMPANIES: ${{ github.event.inputs.max_companies || vars.AUTO_DISCOVERY_MAX_COMPANIES || '10' }}
       AUTO_DISCOVERY_MAX_CANDIDATES_PER_COMPANY: ${{ vars.AUTO_DISCOVERY_MAX_CANDIDATES_PER_COMPANY || '100' }}

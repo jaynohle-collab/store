@@ -9,15 +9,24 @@ from __future__ import annotations
 import json
 import os
 import re
-import sys
 import urllib.error
 import urllib.request
 from typing import Callable
 from urllib.parse import urlencode
 
 BASE = "https://generativelanguage.googleapis.com/v1beta"
-PREFERRED = "gemini-2.5-flash"
+PREFERRED = "gemini-3.6-flash"
+# Listed by some keys but rejected for new users; never choose as primary.
+DEPRECATED_PRIMARY = "gemini-2.5-flash"
 LIST_PAGE_SIZE = 1000
+MINIMAL_GENERATE_PAYLOAD = {
+    "contents": [
+        {
+            "role": "user",
+            "parts": [{"text": "Reply with exactly: ok"}],
+        }
+    ]
+}
 RequestFn = Callable[[str, str, dict | None], tuple[int, str]]
 
 
@@ -122,6 +131,42 @@ def extract_generate_content_names(models: list[object]) -> list[str]:
     return names
 
 
+def is_flash_model(name: str) -> bool:
+    return "flash" in name.lower()
+
+
+def select_flash_candidates(
+    names: list[str],
+    *,
+    preferred: str = PREFERRED,
+    deprecated_primary: str = DEPRECATED_PRIMARY,
+) -> list[str]:
+    """Order Flash models for generateContent attempts.
+
+    Preferred model is first when present. ``gemini-2.5-flash`` is never primary;
+    it is appended last when listed so fallback stays deterministic.
+    """
+    flash = [name for name in names if is_flash_model(name)]
+    ordered: list[str] = []
+    if preferred in flash:
+        ordered.append(preferred)
+    for name in flash:
+        if name in ordered or name == deprecated_primary:
+            continue
+        ordered.append(name)
+    if deprecated_primary in flash and deprecated_primary not in ordered:
+        ordered.append(deprecated_primary)
+    return ordered
+
+
+def is_model_unavailable(status: int, body: str) -> bool:
+    if status == 404:
+        return True
+    code, _message = parse_google_error(body)
+    normalized = str(code).upper()
+    return normalized in {"NOT_FOUND", "MODEL_NOT_FOUND", "404"}
+
+
 def response_has_usable_text(body: str) -> bool:
     try:
         payload = json.loads(body)
@@ -215,59 +260,76 @@ def run_probe(
     for name in generate_content_names:
         print(f"- {name}")
 
-    if preferred not in generate_content_names:
+    candidates = select_flash_candidates(
+        generate_content_names,
+        preferred=preferred,
+    )
+    if not candidates:
         report(
             http_status=list_status,
             selected_model="none",
             usable_text=False,
             error_code="preferred_model_missing",
-            error_message=f"{preferred} not listed for generateContent",
+            error_message=f"no generateContent Flash models listed (wanted {preferred})",
         )
         return 1
 
-    try:
-        gen_status, gen_body = _request(
-            "POST",
-            f"{BASE}/models/{preferred}:generateContent",
-            {
-                "contents": [
-                    {
-                        "role": "user",
-                        "parts": [{"text": "Reply with exactly: ok"}],
-                    }
-                ]
-            },
-        )
-    except NetworkProbeError as exc:
-        report(
-            http_status=0,
-            selected_model=preferred,
-            usable_text=False,
-            error_code="network_error",
-            error_message=exc.message,
-        )
-        return 1
+    last_status = 0
+    last_body = ""
+    last_model = candidates[0]
+    for model in candidates:
+        last_model = model
+        try:
+            gen_status, gen_body = _request(
+                "POST",
+                f"{BASE}/models/{model}:generateContent",
+                MINIMAL_GENERATE_PAYLOAD,
+            )
+        except NetworkProbeError as exc:
+            report(
+                http_status=0,
+                selected_model=model,
+                usable_text=False,
+                error_code="network_error",
+                error_message=exc.message,
+            )
+            return 1
 
-    if gen_status != 200:
+        last_status = gen_status
+        last_body = gen_body
+        if gen_status == 200:
+            usable = response_has_usable_text(gen_body)
+            report(
+                http_status=gen_status,
+                selected_model=model,
+                usable_text=usable,
+                error_code="" if usable else "empty_candidates",
+                error_message="" if usable else "generateContent returned no usable text",
+            )
+            return 0 if usable else 1
+
+        if is_model_unavailable(gen_status, gen_body):
+            continue
+
         code, message = parse_google_error(gen_body)
         report(
             http_status=gen_status,
-            selected_model=preferred,
+            selected_model=model,
             usable_text=False,
             error_code=code,
             error_message=message,
         )
         return 1
 
-    usable = response_has_usable_text(gen_body)
+    code, message = parse_google_error(last_body)
     report(
-        http_status=gen_status,
-        selected_model=preferred,
-        usable_text=usable,
-        error_code="" if usable else "empty_candidates",
-        error_message="" if usable else "generateContent returned no usable text",
+        http_status=last_status,
+        selected_model=last_model,
+        usable_text=False,
+        error_code=code,
+        error_message=message,
     )
-    return 0 if usable else 1
+    return 1
 
 
 def main(argv: list[str] | None = None) -> int:

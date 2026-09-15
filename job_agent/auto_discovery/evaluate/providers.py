@@ -154,11 +154,11 @@ class GeminiProvider(EvaluationProvider):
         transport: httpx.BaseTransport | None = None,
     ):
         self.api_key = api_key
-        # Free-tier default: gemini-2.5-flash (gemini-2.0-flash returns 404 for many keys).
+        # Default: gemini-3.6-flash (gemini-2.5-flash is unavailable to many new keys).
         self.model = (
             model
             or (os.environ.get("GEMINI_MODEL") or "").strip()
-            or "gemini-2.5-flash"
+            or "gemini-3.6-flash"
         )
         self._transport = transport
 

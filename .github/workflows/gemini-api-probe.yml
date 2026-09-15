@@ -1,7 +1,8 @@
 name: Gemini API Probe
 
 # Manual-only diagnostic: list Gemini models that support generateContent and
-# optionally probe gemini-2.5-flash. Read-only against Google Generative Language.
+# probe gemini-3.6-flash (with Flash-model fallback). Read-only against Google
+# Generative Language.
 on:
   workflow_dispatch:
 

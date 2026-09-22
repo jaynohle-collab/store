@@ -77,6 +77,12 @@ export const completeDiscoveryCompanyRunSchema = z
     run_id: z.string().uuid(),
     metrics: z.record(z.string(), z.unknown()).optional().default({}),
     success: z.boolean().default(true),
+    /**
+     * Capacity / pause deferral (e.g. max_evals_reached): release the lease without
+     * treating the company as failed. Clears backoff and makes the company immediately
+     * re-claimable; does not increment consecutive_failures.
+     */
+    deferred: z.boolean().optional().default(false),
     worker_identity: z.string().min(1).max(128),
   })
   .strict();
@@ -177,6 +183,12 @@ export async function upsertDiscoveryCompany(
       next_eligible_at = CASE
         WHEN ${input.force_scan_now} THEN NOW()
         ELSE discovery_companies.next_eligible_at
+      END,
+      -- force_scan_now clears backoff so the company becomes claim-eligible immediately,
+      -- but never clears an active lease (claim still requires active_run_id IS NULL).
+      backoff_until = CASE
+        WHEN ${input.force_scan_now} THEN NULL
+        ELSE discovery_companies.backoff_until
       END,
       updated_at = NOW()
     RETURNING *
@@ -376,12 +388,17 @@ export async function completeDiscoveryCompanyRun(
   const priorStatus = String(prior.status);
   const priorWorker = String(prior.worker_identity || "");
 
-  if (priorStatus === "completed") {
-    if (priorWorker !== workerIdentity) {
-      throw new Error("discovery_company_run_owner_mismatch");
+    if (priorStatus === "completed") {
+      if (priorWorker !== workerIdentity) {
+        throw new Error("discovery_company_run_owner_mismatch");
+      }
+      return {
+        ok: true,
+        idempotent_replay: true,
+        deferred: Boolean(input.deferred),
+        run: mapRow(prior),
+      };
     }
-    return { ok: true, idempotent_replay: true, run: mapRow(prior) };
-  }
 
   if (priorStatus !== "claimed") {
     // Expired / failed / recovered — late worker must not overwrite newer state.
@@ -397,14 +414,61 @@ export async function completeDiscoveryCompanyRun(
   }
 
   const priority = String(prior.scan_priority || "normal") as ScanPriority;
-  const next = computeNextEligibleAt({ priority, success: input.success });
+  const deferred = Boolean(input.deferred);
+  const next = deferred
+    ? new Date()
+    : computeNextEligibleAt({ priority, success: input.success });
 
   // Lock ownership first. Both mutations are driven only from that locked eligible
   // set (FOR UPDATE of run + company). With a single-row PK lock and both UPDATEs
   // sourced from eligible, either both affect one row or neither does — statement
   // atomicity provides all-or-nothing without a planner-unsafe constant fault.
   const results = await sql.transaction([
-    sql`
+    deferred
+      ? sql`
+      WITH eligible AS (
+        SELECT
+          r.id AS run_id,
+          r.company_id
+        FROM discovery_company_runs r
+        INNER JOIN discovery_companies c
+          ON c.id = r.company_id
+         AND c.active_run_id = r.id
+        WHERE r.id = ${input.run_id}::uuid
+          AND r.status = 'claimed'
+          AND r.worker_identity = ${workerIdentity}
+        FOR UPDATE OF r, c
+      ),
+      done AS (
+        UPDATE discovery_company_runs r
+        SET status = 'completed',
+            completed_at = NOW(),
+            metrics = ${metricsJson}::jsonb,
+            updated_at = NOW()
+        FROM eligible e
+        WHERE r.id = e.run_id
+          AND r.status = 'claimed'
+          AND r.worker_identity = ${workerIdentity}
+        RETURNING r.*
+      ),
+      company AS (
+        UPDATE discovery_companies c
+        SET active_run_id = NULL,
+            lease_expires_at = NULL,
+            backoff_until = NULL,
+            next_eligible_at = ${next},
+            stats = COALESCE(stats, '{}'::jsonb) || ${metricsJson}::jsonb,
+            updated_at = NOW()
+        FROM eligible e
+        WHERE c.id = e.company_id
+          AND c.active_run_id = e.run_id
+        RETURNING c.id
+      )
+      SELECT d.*
+      FROM done d
+      WHERE EXISTS (SELECT 1 FROM company)
+    `
+      : sql`
       WITH eligible AS (
         SELECT
           r.id AS run_id,
@@ -467,7 +531,7 @@ export async function completeDiscoveryCompanyRun(
     const status = String(row.status);
     const owner = String(row.worker_identity || "");
     if (status === "completed" && owner === workerIdentity) {
-      return { ok: true, idempotent_replay: true, run: mapRow(row) };
+      return { ok: true, idempotent_replay: true, run: mapRow(row), deferred };
     }
     if (status === "claimed" && owner !== workerIdentity) {
       throw new Error("discovery_company_run_owner_mismatch");
@@ -483,6 +547,7 @@ export async function completeDiscoveryCompanyRun(
   return {
     ok: true,
     idempotent_replay: false,
+    deferred,
     run: mapRow(rows[0] as Record<string, unknown>),
     next_eligible_at: next.toISOString(),
   };
@@ -693,12 +758,15 @@ export async function getAutomaticDiscoveryStatus() {
     FROM discovery_inbox_batches
     WHERE status = 'failed'
   `;
+  // Same eligibility predicate as claimOneDueCompany (enabled, free lease,
+  // next_eligible_at due, and backoff cleared/expired).
   const dueCompanies = await sql`
     SELECT COUNT(*)::int AS count
     FROM discovery_companies
     WHERE enabled = TRUE
       AND active_run_id IS NULL
       AND next_eligible_at <= NOW()
+      AND (backoff_until IS NULL OR backoff_until <= NOW())
   `;
   const failedSources = await sql`
     SELECT COUNT(*)::int AS count
@@ -706,9 +774,15 @@ export async function getAutomaticDiscoveryStatus() {
     WHERE consecutive_failures > 0
   `;
   const nextScan = await sql`
-    SELECT MIN(next_eligible_at) AS next_at
+    SELECT MIN(
+      GREATEST(
+        next_eligible_at,
+        COALESCE(backoff_until, next_eligible_at)
+      )
+    ) AS next_at
     FROM discovery_companies
     WHERE enabled = TRUE
+      AND active_run_id IS NULL
   `;
 
   return {

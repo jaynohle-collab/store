@@ -226,6 +226,63 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             any(name == "complete_discovery_company_run" for name, _ in store.calls)
         )
 
+    async def test_max_evals_reached_defers_without_company_failure(self):
+        store = FakeStore()
+        provider = FakeProvider("ok")
+        second = LightweightCandidate(
+            client_candidate_id="greenhouse:stripe:1003",
+            company="Stripe",
+            title="Senior Platform Engineer",
+            url="https://boards.greenhouse.io/stripe/jobs/1003",
+            source="greenhouse",
+            external_job_id="1003",
+            location="Remote - United States",
+            description="Build production LLM agents and platforms.",
+        )
+        pipeline = AutomaticDiscoveryPipeline(
+            store,
+            provider=provider,  # type: ignore[arg-type]
+            limits=DiscoveryLimits(
+                max_companies=1,
+                max_candidates_per_company=10,
+                max_evals_per_run=1,
+                max_batches_per_run=2,
+                max_jobs_per_batch=10,
+            ),
+        )
+        adapter = FakeAdapter([self.open_cand, second])
+        with mock.patch(
+            "job_agent.auto_discovery.pipeline.get_adapter",
+            return_value=adapter,
+        ):
+            metrics = await pipeline.run()
+
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(metrics.candidates_evaluated, 1)
+        self.assertEqual(metrics.companies_failed, 0)
+        self.assertEqual(metrics.companies_completed, 1)
+        finish = [p for n, p in store.calls if n == "finish_automatic_discovery_run"][0]
+        self.assertEqual(finish["status"], "partial")
+        self.assertEqual(finish["metrics"]["paused_reason"], "max_evals_reached")
+        self.assertFalse(
+            any(name == "fail_discovery_company_run" for name, _ in store.calls)
+        )
+        completes = [
+            p for n, p in store.calls if n == "complete_discovery_company_run"
+        ]
+        self.assertEqual(len(completes), 1)
+        self.assertTrue(completes[0].get("deferred"))
+        self.assertEqual(
+            completes[0].get("metrics", {}).get("deferred_reason"),
+            "max_evals_reached",
+        )
+        self.assertTrue(
+            any(
+                name == "preserve_pending_discovery_evaluations"
+                for name, _ in store.calls
+            )
+        )
+
     async def test_qualified_submit_includes_gpt_evaluation_attachment(self):
         store = FakeStore()
         provider = FakeProvider("ok")

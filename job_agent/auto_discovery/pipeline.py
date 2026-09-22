@@ -312,22 +312,38 @@ class AutomaticDiscoveryPipeline:
             self.metrics.candidates_rejected += 1
 
     async def _release_remaining_claims(self) -> None:
-        """Fail-closed release for claims not completed (quota / early stop)."""
+        """Release claims not completed (quota / early stop).
+
+        ``max_evals_reached`` is a capacity pause: complete as deferred (no failure
+        backoff). Other stop reasons fail-closed.
+        """
+        deferred = self._paused_reason == "max_evals_reached"
         category = "llm_quota" if self._quota_exhausted else "unknown"
         summary = self._paused_reason or "run_stopped_before_company_scan"
         for company in list(self._pending_claims):
             if not company.run_id:
                 continue
             try:
-                await self.store.fail_discovery_company_run(
-                    {
-                        "run_id": company.run_id,
-                        "error_category": category,
-                        "error_summary": summary[:500],
-                        "worker_identity": self.worker_identity,
-                    }
-                )
-                self.metrics.companies_failed += 1
+                if deferred:
+                    await self.store.complete_discovery_company_run(
+                        {
+                            "run_id": company.run_id,
+                            "success": True,
+                            "deferred": True,
+                            "worker_identity": self.worker_identity,
+                            "metrics": {"deferred_reason": "max_evals_reached"},
+                        }
+                    )
+                else:
+                    await self.store.fail_discovery_company_run(
+                        {
+                            "run_id": company.run_id,
+                            "error_category": category,
+                            "error_summary": summary[:500],
+                            "worker_identity": self.worker_identity,
+                        }
+                    )
+                    self.metrics.companies_failed += 1
             except Exception as exc:
                 logger.warning(
                     "failed to release claim for %s: %s",
@@ -455,7 +471,28 @@ class AutomaticDiscoveryPipeline:
                     continue
 
             if company_run_id:
-                if early_stop:
+                capacity_defer = (
+                    early_stop and self._paused_reason == "max_evals_reached"
+                )
+                if capacity_defer:
+                    # Intentional run bound — preserve pending evals, release lease
+                    # without failure backoff / consecutive_failures.
+                    await self.store.complete_discovery_company_run(
+                        {
+                            "run_id": company_run_id,
+                            "success": True,
+                            "deferred": True,
+                            "worker_identity": self.worker_identity,
+                            "metrics": {
+                                "listed": len(candidates),
+                                "qualified_delta": len(qualified_jobs)
+                                - company_qualified_before,
+                                "deferred_reason": "max_evals_reached",
+                            },
+                        }
+                    )
+                    self.metrics.companies_completed += 1
+                elif early_stop:
                     await self.store.fail_discovery_company_run(
                         {
                             "run_id": company_run_id,

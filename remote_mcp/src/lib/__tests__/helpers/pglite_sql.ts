@@ -83,8 +83,19 @@ export async function createEphemeralPglite(): Promise<PgliteSql> {
   const db = new PGlite();
   const sql = createPgliteSql(db);
   await db.exec(`
+    CREATE OR REPLACE FUNCTION gen_random_uuid() RETURNS uuid AS $$
+      SELECT (
+        substr(md5(random()::text || clock_timestamp()::text), 1, 8) || '-' ||
+        substr(md5(random()::text || clock_timestamp()::text), 9, 4) || '-' ||
+        '4' || substr(md5(random()::text || clock_timestamp()::text), 14, 3) || '-' ||
+        substr('89ab', 1 + (random() * 3)::int, 1) ||
+        substr(md5(random()::text || clock_timestamp()::text), 17, 3) || '-' ||
+        substr(md5(random()::text || clock_timestamp()::text), 21, 12)
+      )::uuid;
+    $$ LANGUAGE SQL;
+
     CREATE TABLE discovery_companies (
-      id UUID PRIMARY KEY,
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       company_key TEXT NOT NULL UNIQUE,
       company_name TEXT NOT NULL,
       careers_url TEXT,
@@ -107,7 +118,7 @@ export async function createEphemeralPglite(): Promise<PgliteSql> {
     );
 
     CREATE TABLE discovery_company_runs (
-      id UUID PRIMARY KEY,
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
       company_id UUID NOT NULL REFERENCES discovery_companies (id),
       status TEXT NOT NULL,
       worker_identity TEXT,

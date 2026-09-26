@@ -50,4 +50,8 @@ describe("Milestone 5 automatic discovery TOOL_PERMISSIONS", () => {
       expect.arrayContaining(["jobs:read", "jobs:write", "jobs:worker"]),
     );
   });
+
+  it("exposes get_discovery_evaluation_by_client_id as jobs:read", () => {
+    expect(TOOL_PERMISSIONS.get_discovery_evaluation_by_client_id).toBe("jobs:read");
+  });
 });

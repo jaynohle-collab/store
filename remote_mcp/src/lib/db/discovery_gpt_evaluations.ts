@@ -402,6 +402,31 @@ export async function getDiscoveryGptEvaluationById(
   return rows.length ? toPublicRecord(mapRow(rows[0] as Record<string, unknown>)) : null;
 }
 
+export const getDiscoveryEvaluationByClientIdSchema = z.object({
+  client_evaluation_id: z.string().uuid(),
+});
+
+/** Read-only lookup by deterministic client_evaluation_id (pending-retry reuse). */
+export async function getDiscoveryGptEvaluationByClientId(
+  clientEvaluationId: string,
+): Promise<DiscoveryGptEvaluationRecord | null> {
+  const id = getDiscoveryEvaluationByClientIdSchema.parse({
+    client_evaluation_id: clientEvaluationId,
+  }).client_evaluation_id;
+
+  if (useMemoryBackend) {
+    const row = memoryEvaluations.find((item) => item.client_evaluation_id === id);
+    return row ? toPublicRecord(row) : null;
+  }
+  const sql = getSql();
+  const rows = await sql`
+    SELECT * FROM discovery_gpt_evaluations
+    WHERE client_evaluation_id = ${id}::uuid
+    LIMIT 1
+  `;
+  return rows.length ? toPublicRecord(mapRow(rows[0] as Record<string, unknown>)) : null;
+}
+
 function isNewerServerRecord(
   candidate: PreflightGptEvaluationRow,
   existing: PreflightGptEvaluationRow,

@@ -289,6 +289,12 @@ class RemoteLifecycleStore:
         result = await self._call("record_discovery_evaluations", payload)
         return dict(result or {})
 
+    async def get_discovery_evaluation_by_client_id(
+        self, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        result = await self._call("get_discovery_evaluation_by_client_id", payload)
+        return dict(result or {})
+
     async def list_discovery_companies(
         self, limit: int = 100, offset: int = 0
     ) -> list[dict[str, Any]]:

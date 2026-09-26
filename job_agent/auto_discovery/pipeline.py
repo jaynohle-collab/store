@@ -28,6 +28,7 @@ from job_agent.auto_discovery.types import (
     LightweightCandidate,
     RunMetrics,
 )
+from job_agent.lifecycle.url import normalize_url
 from job_agent.memory.fingerprint import compute_description_hash
 
 logger = logging.getLogger(__name__)
@@ -245,7 +246,11 @@ class AutomaticDiscoveryPipeline:
             )
             pending_id = str(row.get("id") or "")
             try:
-                await self._evaluate_and_record(cand, provider, qualified_jobs)
+                reused = await self._reuse_stored_evaluation_if_valid(
+                    cand, qualified_jobs
+                )
+                if not reused:
+                    await self._evaluate_and_record(cand, provider, qualified_jobs)
                 if pending_id and hasattr(
                     self.store, "complete_pending_discovery_evaluation"
                 ):
@@ -281,6 +286,92 @@ class AutomaticDiscoveryPipeline:
                         }
                     )
 
+    def _stored_evaluation_matches_candidate(
+        self, stored: dict[str, Any], cand: LightweightCandidate
+    ) -> bool:
+        """Validate identity fields before reusing a stored evaluation."""
+        if str(stored.get("evaluation_version") or "") != EVALUATION_VERSION:
+            return False
+        if str(stored.get("source") or "") != str(cand.source or ""):
+            return False
+        if str(stored.get("external_job_id") or "") != str(cand.external_job_id or ""):
+            return False
+        if str(stored.get("description_hash") or "") != str(
+            cand.description_hash or ""
+        ):
+            return False
+        stored_norm = str(stored.get("normalized_url") or "").strip() or normalize_url(
+            str(stored.get("url") or "")
+        )
+        cand_norm = normalize_url(cand.url)
+        if not stored_norm or not cand_norm or stored_norm != cand_norm:
+            return False
+        return True
+
+    def _apply_evaluation_outcome(
+        self,
+        *,
+        cand: LightweightCandidate,
+        description: str,
+        record: dict[str, Any],
+        evaluation_id: str | None,
+        qualified_jobs: list[dict[str, Any]],
+    ) -> None:
+        if record.get("gpt_decision") == "QUALIFIED":
+            if not evaluation_id:
+                raise RuntimeError(
+                    "record_discovery_evaluations did not return evaluation_id "
+                    "for QUALIFIED candidate; refusing submit without evidence"
+                )
+            self.metrics.candidates_qualified += 1
+            qualified_jobs.append(
+                self._job_payload(cand, description, record, evaluation_id)
+            )
+        else:
+            self.metrics.candidates_rejected += 1
+
+    async def _reuse_stored_evaluation_if_valid(
+        self,
+        cand: LightweightCandidate,
+        qualified_jobs: list[dict[str, Any]],
+    ) -> bool:
+        """Reuse a prior persist when pending completion crashed mid-flight.
+
+        Returns True when a matching stored evaluation was applied (no LLM call).
+        Raises when a stored row exists for the deterministic id but identity
+        fields do not match (fail closed — do not re-call the LLM).
+        """
+        if not hasattr(self.store, "get_discovery_evaluation_by_client_id"):
+            return False
+        client_id = self._idempotent_client_id(cand)
+        lookup = await self.store.get_discovery_evaluation_by_client_id(
+            {"client_evaluation_id": client_id}
+        )
+        stored = (lookup or {}).get("evaluation")
+        if not isinstance(stored, dict):
+            return False
+        if not self._stored_evaluation_matches_candidate(stored, cand):
+            raise RuntimeError(
+                "stored evaluation identity mismatch for client_evaluation_id "
+                f"{client_id}; refusing reuse and LLM retry"
+            )
+        evaluation_id = str(
+            stored.get("evaluation_id") or stored.get("id") or ""
+        ).strip()
+        description = (cand.description or "").strip()
+        # Do not increment llm_calls or candidates_evaluated on reuse.
+        self._apply_evaluation_outcome(
+            cand=cand,
+            description=description,
+            record=stored,
+            evaluation_id=evaluation_id or None,
+            qualified_jobs=qualified_jobs,
+        )
+        self.metrics_extra["pending_eval_reused"] = (
+            int(self.metrics_extra.get("pending_eval_reused") or 0) + 1
+        )
+        return True
+
     async def _evaluate_and_record(
         self,
         full: LightweightCandidate,
@@ -291,25 +382,22 @@ class AutomaticDiscoveryPipeline:
         record = evaluate_candidate(provider, full, description)
         # Deterministic id BEFORE record — same fingerprint as pending queue.
         record["client_evaluation_id"] = self._idempotent_client_id(full)
-        self.metrics.candidates_evaluated += 1
+        # LLM was invoked; count the call even if persistence later conflicts.
         self.metrics.llm_calls += 1
 
         recorded = await self.store.record_discovery_evaluations(
             {"evaluations": [record]}
         )
+        # Only count a successful evaluation after durable persist.
+        self.metrics.candidates_evaluated += 1
         evaluation_id = self._extract_evaluation_id(recorded, record)
-        if record.get("gpt_decision") == "QUALIFIED":
-            if not evaluation_id:
-                raise RuntimeError(
-                    "record_discovery_evaluations did not return evaluation_id "
-                    "for QUALIFIED candidate; refusing submit without evidence"
-                )
-            self.metrics.candidates_qualified += 1
-            qualified_jobs.append(
-                self._job_payload(full, description, record, evaluation_id)
-            )
-        else:
-            self.metrics.candidates_rejected += 1
+        self._apply_evaluation_outcome(
+            cand=full,
+            description=description,
+            record=record,
+            evaluation_id=evaluation_id,
+            qualified_jobs=qualified_jobs,
+        )
 
     async def _release_remaining_claims(self) -> None:
         """Release claims not completed (quota / early stop).

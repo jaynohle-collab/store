@@ -4,6 +4,7 @@ import type { McpServer } from "@modelcontextprotocol/server";
 
 import { TOOL_PERMISSIONS } from "@/lib/config";
 import {
+  getDiscoveryGptEvaluationByClientId,
   getMemoryDiscoveryGptEvaluations,
   loadLatestGptEvaluationsForPreflight,
   recordDiscoveryEvaluations,
@@ -851,5 +852,89 @@ describe("record_discovery_evaluations MCP registration", () => {
     expect(result.ok).toBe(true);
     expect(result.count).toBe(1);
     expect(getMemoryDiscoveryGptEvaluations()).toHaveLength(1);
+  });
+});
+
+describe("get_discovery_evaluation_by_client_id", () => {
+  beforeEach(() => {
+    useInMemoryDiscoveryGptEvaluations();
+    resetInMemoryDiscoveryGptEvaluations();
+  });
+
+  afterEach(() => {
+    resetInMemoryDiscoveryGptEvaluations();
+  });
+
+  it("returns null when no evaluation exists", async () => {
+    const missing = await getDiscoveryGptEvaluationByClientId(randomUUID());
+    expect(missing).toBeNull();
+  });
+
+  it("returns the stored evaluation by client_evaluation_id", async () => {
+    const id = randomUUID();
+    const recorded = await recordDiscoveryEvaluations({
+      evaluations: [validEvaluation({ client_evaluation_id: id })] as never,
+    });
+    const found = await getDiscoveryGptEvaluationByClientId(id);
+    expect(found).not.toBeNull();
+    expect(found?.client_evaluation_id).toBe(id);
+    expect(found?.evaluation_id).toBe(recorded.evaluations[0].evaluation_id);
+    expect(found?.description_hash).toBe(HASH_A);
+  });
+
+  it("registers read-only MCP tool and requires jobs:read", async () => {
+    const tools: Record<
+      string,
+      {
+        config: Record<string, unknown>;
+        handler: (
+          args: Record<string, unknown>,
+          extra: { http: { authInfo: { token: string; clientId: string; scopes: string[] } } },
+        ) => Promise<{
+          content: Array<{ type: string; text: string }>;
+          isError?: boolean;
+          structuredContent?: Record<string, unknown>;
+        }>;
+      }
+    > = {};
+    const server = {
+      registerTool(
+        name: string,
+        config: Record<string, unknown>,
+        handler: (typeof tools)[string]["handler"],
+      ) {
+        tools[name] = { config, handler };
+      },
+    } as unknown as McpServer;
+    registerJobTools(server);
+
+    expect(tools.get_discovery_evaluation_by_client_id).toBeTruthy();
+    expect(TOOL_PERMISSIONS.get_discovery_evaluation_by_client_id).toBe("jobs:read");
+    expect(tools.get_discovery_evaluation_by_client_id.config.annotations).toMatchObject({
+      readOnlyHint: true,
+      idempotentHint: true,
+    });
+
+    const denied = await tools.get_discovery_evaluation_by_client_id.handler(
+      { client_evaluation_id: randomUUID() },
+      { http: { authInfo: { token: "t", clientId: "c", scopes: [] } } },
+    );
+    expect(denied.isError).toBe(true);
+
+    const id = randomUUID();
+    await recordDiscoveryEvaluations({
+      evaluations: [validEvaluation({ client_evaluation_id: id })] as never,
+    });
+    const ok = await tools.get_discovery_evaluation_by_client_id.handler(
+      { client_evaluation_id: id },
+      { http: { authInfo: { token: "t", clientId: "c", scopes: ["jobs:read"] } } },
+    );
+    expect(ok.isError).toBeFalsy();
+    const body = JSON.parse(ok.content[0].text) as {
+      found: boolean;
+      evaluation: { client_evaluation_id: string } | null;
+    };
+    expect(body.found).toBe(true);
+    expect(body.evaluation?.client_evaluation_id).toBe(id);
   });
 });

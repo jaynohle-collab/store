@@ -2,6 +2,8 @@ import type { AuthInfo, McpServer } from "@modelcontextprotocol/server";
 
 import { assertToolPermission } from "../auth/permissions";
 import {
+  getDiscoveryEvaluationByClientIdSchema,
+  getDiscoveryGptEvaluationByClientId,
   recordDiscoveryEvaluations,
   recordDiscoveryEvaluationsSchema,
 } from "../db/discovery_gpt_evaluations";
@@ -36,6 +38,46 @@ function errorResult(message: string) {
 }
 
 export function registerDiscoveryGptEvaluationTools(server: McpServer): void {
+  server.registerTool(
+    "get_discovery_evaluation_by_client_id",
+    {
+      title: "Get Discovery Evaluation By Client ID",
+      description:
+        "Read-only lookup of a stored GPT discovery evaluation by deterministic" +
+        " client_evaluation_id. Used by automatic discovery to reuse evidence after" +
+        " a crash between persist and pending-row completion. Does not create," +
+        " update, or delete evaluations." +
+        GPT_EVAL_NOTE,
+      inputSchema: getDiscoveryEvaluationByClientIdSchema,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (args, extra) => {
+      try {
+        assertToolPermission(getAuth(extra), "get_discovery_evaluation_by_client_id");
+        const parsed = getDiscoveryEvaluationByClientIdSchema.parse(args);
+        const evaluation = await getDiscoveryGptEvaluationByClientId(
+          parsed.client_evaluation_id,
+        );
+        return jsonResult({
+          ok: true,
+          found: evaluation != null,
+          evaluation,
+        });
+      } catch (error) {
+        return errorResult(
+          error instanceof Error
+            ? error.message
+            : "Failed to get discovery evaluation by client id",
+        );
+      }
+    },
+  );
+
   server.registerTool(
     "compute_discovery_description_hashes",
     {

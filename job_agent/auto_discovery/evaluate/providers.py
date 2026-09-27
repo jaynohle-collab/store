@@ -9,8 +9,12 @@ from __future__ import annotations
 import json
 import logging
 import os
+import random
+import re
+import time
 from abc import ABC, abstractmethod
-from typing import Any
+from email.utils import parsedate_to_datetime
+from typing import Any, Callable
 
 import httpx
 
@@ -18,9 +22,63 @@ from job_agent.auto_discovery.types import AdapterError
 
 logger = logging.getLogger(__name__)
 
+RETRYABLE_GEMINI_STATUSES = frozenset({500, 502, 503, 504})
+GEMINI_MAX_ATTEMPTS = 3
+GEMINI_BACKOFF_BASE_SECONDS = 2.0
+GEMINI_BACKOFF_CAP_SECONDS = 8.0
+GEMINI_RETRY_AFTER_CAP_SECONDS = 30.0
+_ERROR_MESSAGE_MAX = 160
+
+_SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"AIza[0-9A-Za-z_-]{10,}"), "[redacted]"),
+    (re.compile(r"\bsk-[0-9A-Za-z_-]{8,}"), "[redacted]"),
+    (re.compile(r"\borg-[0-9A-Za-z]{6,}"), "[redacted]"),
+    (re.compile(r"(?i)\bbearer\s+\S+"), "Bearer [redacted]"),
+    (
+        re.compile(r"(?i)\b(api[_-]?key|authorization|x-goog-api-key|key)\s*[:=]\s*\S+"),
+        r"\1=[redacted]",
+    ),
+)
+
+
+def sanitize_error_text(text: str, *, limit: int = _ERROR_MESSAGE_MAX) -> str:
+    """Collapse whitespace, redact credentials, and bound length."""
+    out = " ".join((text or "").split())
+    for pattern, replacement in _SECRET_PATTERNS:
+        out = pattern.sub(replacement, out)
+    return out[:limit]
+
+
+def parse_provider_error(body: str) -> tuple[str, str]:
+    """Return sanitized ``(status, message)`` from a Google/OpenAI-style error body.
+
+    Never returns the raw body: unparseable payloads yield ``unparseable_error``.
+    """
+    try:
+        payload = json.loads(body or "")
+    except (json.JSONDecodeError, TypeError):
+        return "unknown", "unparseable_error"
+    err = payload.get("error") if isinstance(payload, dict) else None
+    if not isinstance(err, dict):
+        return "unknown", "unparseable_error"
+    status = err.get("status") or err.get("code") or err.get("type") or "unknown"
+    message = sanitize_error_text(str(err.get("message") or "")) or "empty_message"
+    return sanitize_error_text(str(status), limit=40), message
+
 
 class TransientProviderError(Exception):
     """Provider failure that is safe to retry on the next configured provider."""
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        status_code: int | None = None,
+        provider_status: str | None = None,
+    ):
+        super().__init__(message)
+        self.status_code = status_code
+        self.provider_status = provider_status
 
 
 class QuotaExhaustedError(TransientProviderError):
@@ -56,25 +114,56 @@ def _parse_json_content(text: str) -> dict[str, Any]:
 
 
 def _raise_for_provider_http(provider: str, status: int, body: str) -> None:
+    if status < 400:
+        return
     lower = (body or "").lower()
+    err_status, err_message = parse_provider_error(body)
+    detail = f"{provider} HTTP {status}"
+    if err_status != "unknown" or err_message != "unparseable_error":
+        detail = f"{detail} {err_status}: {err_message}"
+    kwargs = {"status_code": status, "provider_status": err_status}
     if status == 402:
-        raise QuotaExhaustedError(f"{provider} HTTP {status}")
+        raise QuotaExhaustedError(detail, **kwargs)
     if status == 429:
         # Rate-limit and quota both warrant trying the next provider.
-        raise QuotaExhaustedError(f"{provider} HTTP 429")
+        raise QuotaExhaustedError(detail, **kwargs)
     if "quota" in lower and status in (403, 503):
-        raise QuotaExhaustedError(f"{provider} HTTP {status}")
-    if status in {500, 502, 503, 504}:
-        raise TransientProviderError(f"{provider} HTTP {status}")
+        raise QuotaExhaustedError(detail, **kwargs)
+    if status in RETRYABLE_GEMINI_STATUSES:
+        raise TransientProviderError(detail, **kwargs)
     if status == 404:
         # Model id unavailable / renamed — try next provider when configured.
-        raise TransientProviderError(f"{provider} HTTP 404")
-    if status >= 400:
-        raise AdapterError(
-            f"{provider} HTTP {status}",
-            category="validation",
-            status_code=status,
-        )
+        raise TransientProviderError(detail, **kwargs)
+    raise AdapterError(detail, category="validation", status_code=status)
+
+
+def parse_retry_after(value: str | None, *, now: float | None = None) -> float | None:
+    """Parse a Retry-After header (seconds or HTTP date) into bounded seconds."""
+    raw = (value or "").strip()
+    if not raw:
+        return None
+    try:
+        seconds = float(raw)
+    except ValueError:
+        try:
+            when = parsedate_to_datetime(raw)
+        except (TypeError, ValueError):
+            return None
+        if when is None:
+            return None
+        seconds = when.timestamp() - (time.time() if now is None else now)
+    if seconds != seconds or seconds < 0:  # NaN or past date
+        return 0.0
+    return min(seconds, GEMINI_RETRY_AFTER_CAP_SECONDS)
+
+
+def backoff_delay(attempt: int, rng: Callable[[], float] = random.random) -> float:
+    """Equal-jitter exponential backoff for retry ``attempt`` (1-based)."""
+    ceiling = min(
+        GEMINI_BACKOFF_CAP_SECONDS,
+        GEMINI_BACKOFF_BASE_SECONDS * (2 ** max(attempt - 1, 0)),
+    )
+    return ceiling / 2 + rng() * (ceiling / 2)
 
 
 class EvaluationProvider(ABC):
@@ -152,6 +241,11 @@ class GeminiProvider(EvaluationProvider):
         api_key: str,
         model: str | None = None,
         transport: httpx.BaseTransport | None = None,
+        *,
+        max_attempts: int = GEMINI_MAX_ATTEMPTS,
+        sleep: Callable[[float], None] = time.sleep,
+        rng: Callable[[], float] = random.random,
+        clock: Callable[[], float] = time.monotonic,
     ):
         self.api_key = api_key
         # Default: gemini-3.6-flash (gemini-2.5-flash is unavailable to many new keys).
@@ -161,20 +255,16 @@ class GeminiProvider(EvaluationProvider):
             or "gemini-3.6-flash"
         )
         self._transport = transport
+        self.max_attempts = max(1, min(int(max_attempts), GEMINI_MAX_ATTEMPTS))
+        self._sleep = sleep
+        self._rng = rng
+        self._clock = clock
+        # Safe per-attempt diagnostics for the last complete_json call (no payloads).
+        self.last_attempts: list[dict[str, Any]] = []
 
-    def complete_json(
-        self,
-        *,
-        system: str,
-        user: str,
-        schema: dict[str, Any],
-    ) -> dict[str, Any]:
-        # Prefer header auth so the key is less likely to appear in proxy URL logs.
-        url = (
-            f"https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{self.model}:generateContent"
-        )
-        payload = {
+    @staticmethod
+    def build_payload(*, system: str, user: str, schema: dict[str, Any]) -> dict[str, Any]:
+        return {
             "systemInstruction": {"parts": [{"text": system}]},
             "contents": [
                 {
@@ -193,25 +283,97 @@ class GeminiProvider(EvaluationProvider):
                 "responseMimeType": "application/json",
             },
         }
-        try:
-            with httpx.Client(transport=self._transport, timeout=60.0) as client:
-                response = client.post(
-                    url,
-                    headers={
-                        "Content-Type": "application/json",
-                        "x-goog-api-key": self.api_key,
-                    },
-                    json=payload,
-                )
-        except (httpx.TimeoutException, httpx.NetworkError, httpx.TransportError) as exc:
-            raise TransientProviderError(f"gemini transport: {type(exc).__name__}") from None
-        _raise_for_provider_http("gemini", response.status_code, response.text)
+
+    def complete_json(
+        self,
+        *,
+        system: str,
+        user: str,
+        schema: dict[str, Any],
+    ) -> dict[str, Any]:
+        # Prefer header auth so the key is less likely to appear in proxy URL logs.
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{self.model}:generateContent"
+        )
+        payload = self.build_payload(system=system, user=user, schema=schema)
+        body = json.dumps(payload).encode("utf-8")
+        self.last_attempts = []
+        response = self._post_with_retry(url, body)
         data = response.json()
         try:
             content = data["candidates"][0]["content"]["parts"][0]["text"]
         except (KeyError, IndexError, TypeError) as exc:
             raise InvalidModelOutputError("gemini response missing content") from exc
         return _parse_json_content(str(content))
+
+    def _post_with_retry(self, url: str, body: bytes) -> httpx.Response:
+        """POST with bounded retry on 500/502/503/504; other errors raise immediately."""
+        headers = {
+            "Content-Type": "application/json",
+            "x-goog-api-key": self.api_key,
+        }
+        for attempt in range(1, self.max_attempts + 1):
+            started = self._clock()
+            record: dict[str, Any] = {
+                "attempt": attempt,
+                "model": self.model,
+                "request_bytes": len(body),
+                "http_status": None,
+                "error_status": None,
+                "error_message": None,
+                "duration_ms": 0,
+            }
+            self.last_attempts.append(record)
+            try:
+                with httpx.Client(transport=self._transport, timeout=60.0) as client:
+                    response = client.post(url, headers=headers, content=body)
+            except (httpx.TimeoutException, httpx.NetworkError, httpx.TransportError) as exc:
+                record["duration_ms"] = int((self._clock() - started) * 1000)
+                record["error_status"] = f"transport:{type(exc).__name__}"
+                raise TransientProviderError(
+                    f"gemini transport: {type(exc).__name__} (attempt {attempt})"
+                ) from None
+            record["duration_ms"] = int((self._clock() - started) * 1000)
+            record["http_status"] = response.status_code
+            if response.status_code < 400:
+                return response
+            record["error_status"], record["error_message"] = parse_provider_error(
+                response.text
+            )
+            try:
+                _raise_for_provider_http("gemini", response.status_code, response.text)
+            except QuotaExhaustedError:
+                raise
+            except TransientProviderError as exc:
+                retryable = response.status_code in RETRYABLE_GEMINI_STATUSES
+                logger.warning(
+                    "gemini attempt %d/%d failed: model=%s http_status=%s "
+                    "error_status=%s error_message=%s request_bytes=%d duration_ms=%d",
+                    attempt,
+                    self.max_attempts,
+                    self.model,
+                    response.status_code,
+                    record["error_status"],
+                    record["error_message"],
+                    len(body),
+                    record["duration_ms"],
+                )
+                if not retryable or attempt >= self.max_attempts:
+                    raise TransientProviderError(
+                        f"{exc} (attempts={attempt})",
+                        status_code=exc.status_code,
+                        provider_status=exc.provider_status,
+                    ) from None
+                retry_after = parse_retry_after(response.headers.get("retry-after"))
+                delay = (
+                    retry_after
+                    if retry_after is not None
+                    else backoff_delay(attempt, self._rng)
+                )
+                record["retry_delay_s"] = round(delay, 3)
+                self._sleep(delay)
+        raise AssertionError("unreachable")  # pragma: no cover
 
 
 class GroqProvider(EvaluationProvider):
@@ -300,8 +462,9 @@ class FallbackEvaluationProvider(EvaluationProvider):
             except TransientProviderError as exc:
                 errors.append(f"{provider.name}:{exc}")
                 logger.warning(
-                    "LLM provider %s transient failure; trying next if available",
+                    "LLM provider %s transient failure (%s); trying next if available",
                     provider.name,
+                    sanitize_error_text(str(exc), limit=240),
                 )
                 continue
             except InvalidModelOutputError as exc:

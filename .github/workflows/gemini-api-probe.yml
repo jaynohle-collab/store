@@ -1,10 +1,16 @@
 name: Gemini API Probe
 
-# Manual-only diagnostic: list Gemini models that support generateContent and
-# probe gemini-3.6-flash (with Flash-model fallback). Read-only against Google
-# Generative Language.
+# Manual-only diagnostic: list Gemini models that support generateContent, then
+# run production-parity stages (minimal text, small structured JSON, realistic
+# gpt-fit-v2 via GeminiProvider with a synthetic fixture). Read-only against
+# Google Generative Language.
 on:
   workflow_dispatch:
+    inputs:
+      description_sizes:
+        description: "Comma-separated fixture description sizes (chars, max 80000)"
+        required: false
+        default: "6000"
 
 permissions:
   contents: read
@@ -12,7 +18,7 @@ permissions:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -22,14 +28,18 @@ jobs:
         with:
           python-version: "3.11"
 
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
       - name: Probe Gemini listModels and generateContent
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_PROBE_DESCRIPTION_SIZES: ${{ inputs.description_sizes }}
         run: |
           set -euo pipefail
           if [ -z "${GEMINI_API_KEY}" ]; then
             echo "GEMINI_API_KEY is not configured"
             exit 1
           fi
-          # Never echo the secret, headers, or full provider payloads.
+          # Never echo the secret, headers, prompts, or full provider payloads.
           python -m job_agent.examples.gemini_api_probe

@@ -123,21 +123,41 @@ describe("automatic-job-discovery workflow contract", () => {
     expect(workflowYaml).not.toContain("jobs:revert");
   });
 
-  it("passes repository limit variables into the producer env", () => {
+  it("passes separate listing / top-K / eval limits with legacy fallbacks", () => {
     expect(workflowYaml).toContain(
-      "AUTO_DISCOVERY_MAX_COMPANIES: ${{ github.event.inputs.max_companies || vars.AUTO_DISCOVERY_MAX_COMPANIES || '10' }}",
+      "AUTO_DISCOVERY_MAX_COMPANIES_PER_RUN: ${{ github.event.inputs.max_companies || vars.AUTO_DISCOVERY_MAX_COMPANIES_PER_RUN || vars.AUTO_DISCOVERY_MAX_COMPANIES || '5' }}",
     );
     expect(workflowYaml).toContain(
-      "AUTO_DISCOVERY_MAX_CANDIDATES_PER_COMPANY: ${{ vars.AUTO_DISCOVERY_MAX_CANDIDATES_PER_COMPANY || '100' }}",
+      "AUTO_DISCOVERY_MAX_LISTINGS_PER_COMPANY: ${{ vars.AUTO_DISCOVERY_MAX_LISTINGS_PER_COMPANY || vars.AUTO_DISCOVERY_MAX_CANDIDATES_PER_COMPANY || '100' }}",
     );
     expect(workflowYaml).toContain(
-      "AUTO_DISCOVERY_MAX_EVALS_PER_RUN: ${{ vars.AUTO_DISCOVERY_MAX_EVALS_PER_RUN || '50' }}",
+      "AUTO_DISCOVERY_TOP_CANDIDATES_PER_COMPANY: ${{ github.event.inputs.top_candidates || vars.AUTO_DISCOVERY_TOP_CANDIDATES_PER_COMPANY || '5' }}",
     );
     expect(workflowYaml).toContain(
-      "AUTO_DISCOVERY_MAX_BATCHES_PER_RUN: ${{ vars.AUTO_DISCOVERY_MAX_BATCHES_PER_RUN || '10' }}",
+      "AUTO_DISCOVERY_MAX_EVALS_PER_RUN: ${{ github.event.inputs.max_evals || vars.AUTO_DISCOVERY_MAX_EVALS_PER_RUN || '15' }}",
     );
     expect(workflowYaml).toContain(
-      "AUTO_DISCOVERY_MAX_JOBS_PER_BATCH: ${{ vars.AUTO_DISCOVERY_MAX_JOBS_PER_BATCH || '25' }}",
+      "AUTO_DISCOVERY_MAX_BATCHES_PER_RUN: ${{ vars.AUTO_DISCOVERY_MAX_BATCHES_PER_RUN || '3' }}",
+    );
+    expect(workflowYaml).toContain(
+      "AUTO_DISCOVERY_MAX_JOBS_PER_BATCH: ${{ vars.AUTO_DISCOVERY_MAX_JOBS_PER_BATCH || '5' }}",
+    );
+    expect(workflowYaml).toContain('--max-companies "${MAX}"');
+  });
+
+  it("runs bounded, non-blocking company expansion before the producer", () => {
+    const expandIdx = workflowYaml.indexOf(
+      "python -m job_agent.examples.expand_discovery_companies",
+    );
+    const producerIdx = workflowYaml.indexOf(
+      "python -m job_agent.examples.automatic_discovery_run",
+    );
+    expect(expandIdx).toBeGreaterThan(0);
+    expect(expandIdx).toBeLessThan(producerIdx);
+    expect(workflowYaml).toContain("continue-on-error: true");
+    expect(workflowYaml).toContain("vars.AUTO_DISCOVERY_EXPANSION_ENABLED != 'false'");
+    expect(workflowYaml).toContain(
+      "AUTO_DISCOVERY_MAX_VERIFICATIONS_PER_RUN: ${{ vars.AUTO_DISCOVERY_MAX_VERIFICATIONS_PER_RUN || '5' }}",
     );
     expect(workflowYaml).toContain(
       "GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.6-flash' }}",

@@ -279,6 +279,42 @@ class RemoteLifecycleStore:
         result = await self._call("check_discovery_candidates", payload)
         return dict(result or {})
 
+    async def lookup_discovery_evaluation_states(
+        self, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        result = await self._call("lookup_discovery_evaluation_states", payload)
+        return dict(result or {})
+
+    async def upsert_discovery_company_candidates(
+        self, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        result = await self._call("upsert_discovery_company_candidates", payload)
+        return dict(result or {})
+
+    async def claim_discovery_company_candidates(
+        self, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        result = await self._call("claim_discovery_company_candidates", payload)
+        return dict(result or {})
+
+    async def record_discovery_company_verification(
+        self, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        result = await self._call("record_discovery_company_verification", payload)
+        return dict(result or {})
+
+    async def list_discovery_company_candidates(
+        self, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        result = await self._call("list_discovery_company_candidates", payload or {})
+        return dict(result or {})
+
+    async def list_discovery_posting_url_hints(
+        self, payload: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        result = await self._call("list_discovery_posting_url_hints", payload or {})
+        return dict(result or {})
+
     async def compute_discovery_description_hashes(
         self, payload: dict[str, Any]
     ) -> dict[str, Any]:

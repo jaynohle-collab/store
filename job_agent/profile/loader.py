@@ -3,10 +3,17 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 from ..models.types import JobSearchProfile, RejectionConfig, ScoringWeights
+
+# Profiles written before profile_id existed belong to the original persona.
+DEFAULT_PROFILE_ID = "jay"
+# Must stay in sync with the MCP profile identity schema (gpt_evaluation.ts).
+_PROFILE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+_PROFILE_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 
 REQUIRED_WEIGHT_KEYS = (
     "role_fit",
@@ -41,6 +48,11 @@ def load_job_search_profile(path: Path) -> JobSearchProfile:
         raise ProfileLoadError("Job search profile must be a JSON object")
 
     profile_version = _require_str(data, "profile_version")
+    if not _PROFILE_VERSION_RE.match(profile_version):
+        raise ProfileLoadError("profile_version must be a version slug")
+    profile_id = str(data.get("profile_id") or DEFAULT_PROFILE_ID).strip()
+    if not _PROFILE_ID_RE.match(profile_id):
+        raise ProfileLoadError("profile_id must be a lowercase slug")
     target_roles = _require_str_list(data, "target_roles")
     priority_skills = _require_str_list(data, "priority_skills")
     preferred_locations = _require_str_list(data, "preferred_locations")
@@ -71,6 +83,7 @@ def load_job_search_profile(path: Path) -> JobSearchProfile:
         reject=reject,
         weights=weights,
         high_match_threshold=high_match_threshold,
+        profile_id=profile_id,
     )
 
 

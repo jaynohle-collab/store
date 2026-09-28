@@ -71,35 +71,46 @@ class RunMetrics:
     companies_claimed: int = 0
     companies_completed: int = 0
     companies_failed: int = 0
+    # Capacity / provider pauses released without failure backoff.
+    companies_deferred: int = 0
+    # Listings returned by ATS list endpoints ("listings fetched").
     candidates_listed: int = 0
     candidates_deterministic_rejected: int = 0
+    # Listings that passed structural + persona rejects.
+    candidates_normalized: int = 0
     candidates_preflighted: int = 0
+    # Preflight skips: known postings, prior applications, duplicates, evidence.
     candidates_skipped: int = 0
+    candidates_ranked: int = 0
+    candidates_selected: int = 0
+    candidates_unchanged_skipped: int = 0
+    candidates_below_threshold: int = 0
+    full_descriptions_requested: int = 0
+    stored_reused: int = 0
+    # New LLM evaluations durably persisted.
     candidates_evaluated: int = 0
     candidates_qualified: int = 0
     candidates_rejected: int = 0
+    qualified_unsubmitted: int = 0
     batches_submitted: int = 0
+    jobs_submitted: int = 0
     llm_calls: int = 0
+    estimated_llm_tokens: int = 0
+    pending_preserved: int = 0
+    listing_requests: int = 0
+    rate_limit_responses: int = 0
+    http_retries: int = 0
+    bytes_downloaded: int = 0
+    duration_seconds: float = 0.0
     errors: list[str] = field(default_factory=list)
     submitted_batch_ids: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
-        return {
-            "companies_claimed": self.companies_claimed,
-            "companies_completed": self.companies_completed,
-            "companies_failed": self.companies_failed,
-            "candidates_listed": self.candidates_listed,
-            "candidates_deterministic_rejected": self.candidates_deterministic_rejected,
-            "candidates_preflighted": self.candidates_preflighted,
-            "candidates_skipped": self.candidates_skipped,
-            "candidates_evaluated": self.candidates_evaluated,
-            "candidates_qualified": self.candidates_qualified,
-            "candidates_rejected": self.candidates_rejected,
-            "batches_submitted": self.batches_submitted,
-            "llm_calls": self.llm_calls,
-            "errors": list(self.errors),
-            "submitted_batch_ids": list(self.submitted_batch_ids),
-        }
+        out: dict[str, Any] = {}
+        for name in self.__dataclass_fields__:
+            value = getattr(self, name)
+            out[name] = list(value) if isinstance(value, list) else value
+        return out
 
 
 class AdapterError(RuntimeError):

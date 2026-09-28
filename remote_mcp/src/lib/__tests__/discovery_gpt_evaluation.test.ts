@@ -257,7 +257,9 @@ describe("record_discovery_evaluations persistence coverage", () => {
     expect(row.gpt_relevance_score).toBe(82);
     expect(row).not.toHaveProperty("match_score");
     expect(row).not.toHaveProperty("scoring_version");
-    expect(row).not.toHaveProperty("profile_version");
+    // Persona generation identity (not a Python score); unset means legacy generation.
+    expect(row.profile_id ?? null).toBeNull();
+    expect(row.profile_version ?? null).toBeNull();
   });
 
   it("retains evaluation history by version and description hash", async () => {

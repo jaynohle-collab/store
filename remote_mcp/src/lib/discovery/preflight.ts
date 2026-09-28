@@ -8,6 +8,7 @@ import { z } from "zod";
 import {
   DEFAULT_GPT_EVALUATION_VERSION,
   descriptionHashSchema,
+  profileGenerationFilterSchema,
   resolveGptPreflightFields,
   type PriorGptEvaluationSummary,
 } from "./gpt_evaluation";
@@ -89,6 +90,8 @@ export const checkDiscoveryCandidatesSchema = z
   .object({
     candidates: z.array(discoveryPreflightCandidateSchema).min(1).max(100),
     evaluation_version: z.string().min(1).max(64).optional(),
+    /** Restrict prior GPT evidence to one persona generation (automatic producer). */
+    profile: profileGenerationFilterSchema.optional(),
   })
   .strict();
 

@@ -4,6 +4,8 @@ import { assertToolPermission } from "../auth/permissions";
 import {
   getDiscoveryEvaluationByClientIdSchema,
   getDiscoveryGptEvaluationByClientId,
+  lookupDiscoveryEvaluationStates,
+  lookupDiscoveryEvaluationStatesSchema,
   recordDiscoveryEvaluations,
   recordDiscoveryEvaluationsSchema,
 } from "../db/discovery_gpt_evaluations";
@@ -73,6 +75,41 @@ export function registerDiscoveryGptEvaluationTools(server: McpServer): void {
           error instanceof Error
             ? error.message
             : "Failed to get discovery evaluation by client id",
+        );
+      }
+    },
+  );
+
+  server.registerTool(
+    "lookup_discovery_evaluation_states",
+    {
+      title: "Lookup Discovery Evaluation States",
+      description:
+        "Read-only: latest stored GPT evidence for up to 200 lightweight candidates" +
+        " (matched by normalized URL or source + external_job_id) for one evaluation" +
+        " version and persona generation (profile_id + profile_version). Reports" +
+        " whether that evidence is already attached to an inbox batch. Used to rank" +
+        " new/changed listings before full fetches. Does not score or write." +
+        GPT_EVAL_NOTE,
+      inputSchema: lookupDiscoveryEvaluationStatesSchema,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (args, extra) => {
+      try {
+        assertToolPermission(getAuth(extra), "lookup_discovery_evaluation_states");
+        const parsed = lookupDiscoveryEvaluationStatesSchema.parse(args);
+        const payload = await lookupDiscoveryEvaluationStates(parsed);
+        return jsonResult({ ok: true, count: payload.states.length, ...payload });
+      } catch (error) {
+        return errorResult(
+          error instanceof Error
+            ? error.message
+            : "Failed to lookup discovery evaluation states",
         );
       }
     },

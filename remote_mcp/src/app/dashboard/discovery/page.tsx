@@ -2,12 +2,25 @@ import {
   getAutomaticDiscoveryStatus,
   listDiscoveryRunsPage,
 } from "@/lib/db/dashboard";
+import { getActiveProfileId, getActiveProfileVersion } from "@/lib/dashboard/time";
 import { formatDate } from "../_components/JobTable";
 
 export const dynamic = "force-dynamic";
 
 type AutoStatus = {
   latest_runs: Record<string, unknown>[];
+  registry?: {
+    total: number;
+    enabled: number;
+    by_provider: Array<{ ats_provider: string; total: number; enabled: number }>;
+  };
+  company_candidates?: Record<string, number> | null;
+  profile_evaluations?: Array<{
+    profile_id: string | null;
+    profile_version: string | null;
+    gpt_decision: string;
+    count: number;
+  }>;
   pending_batches: number;
   failed_batches: number;
   due_companies: number;
@@ -21,6 +34,36 @@ function metricValue(metrics: unknown, key: string): string {
   if (value == null) return "—";
   return String(value);
 }
+
+const RUN_METRIC_LABELS: Array<[string, string]> = [
+  ["companies_claimed", "Companies claimed"],
+  ["companies_completed", "Completed"],
+  ["companies_deferred", "Deferred"],
+  ["companies_failed", "Failed"],
+  ["candidates_listed", "Listings fetched"],
+  ["candidates_deterministic_rejected", "Rule rejected"],
+  ["candidates_skipped", "Known / applied / duplicate"],
+  ["candidates_ranked", "Ranked"],
+  ["candidates_unchanged_skipped", "Unchanged"],
+  ["candidates_below_threshold", "Below threshold"],
+  ["candidates_selected", "Selected (top-K)"],
+  ["full_descriptions_requested", "Full JDs fetched"],
+  ["stored_reused", "Evidence reused"],
+  ["candidates_evaluated", "New LLM evaluations"],
+  ["llm_calls", "LLM calls"],
+  ["estimated_llm_tokens", "Est. tokens"],
+  ["candidates_qualified", "Qualified"],
+  ["candidates_rejected", "Rejected"],
+  ["qualified_unsubmitted", "Qualified, unsubmitted"],
+  ["batches_submitted", "Batches submitted"],
+  ["jobs_submitted", "Jobs submitted"],
+  ["pending_preserved", "Pending preserved"],
+  ["listing_requests", "HTTP requests"],
+  ["rate_limit_responses", "Rate limited"],
+  ["http_retries", "HTTP retries"],
+  ["bytes_downloaded", "Bytes downloaded"],
+  ["duration_seconds", "Duration (s)"],
+];
 
 export default async function DiscoveryRunsPage() {
   let runs: Record<string, unknown>[] = [];
@@ -45,6 +88,15 @@ export default async function DiscoveryRunsPage() {
   }
 
   const latestAuto = autoStatus?.latest_runs?.[0] ?? null;
+  const profileId = getActiveProfileId();
+  const profileVersion = getActiveProfileVersion();
+  const runProfile =
+    latestAuto?.metrics && typeof latestAuto.metrics === "object"
+      ? (latestAuto.metrics as Record<string, unknown>)
+      : null;
+  const shownMetrics = RUN_METRIC_LABELS.filter(
+    ([key]) => runProfile && runProfile[key] != null,
+  );
 
   return (
     <>
@@ -102,6 +154,59 @@ export default async function DiscoveryRunsPage() {
                 <div>{formatDate(autoStatus.next_scheduled_scan)}</div>
               </div>
             </div>
+            <div className="muted" style={{ fontSize: "0.9rem", marginBottom: "0.75rem" }}>
+              Active profile: <strong>{profileId}</strong> / <strong>{profileVersion}</strong>
+              {runProfile?.profile_version
+                ? ` · last run used ${String(runProfile.profile_id ?? "—")} / ${String(runProfile.profile_version)}`
+                : null}
+            </div>
+            {shownMetrics.length ? (
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(auto-fit, minmax(10rem, 1fr))",
+                  gap: "0.5rem",
+                  marginBottom: "1rem",
+                  fontSize: "0.9rem",
+                }}
+              >
+                {shownMetrics.map(([key, label]) => (
+                  <div key={key}>
+                    <div className="muted">{label}</div>
+                    <div>{metricValue(runProfile, key)}</div>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {autoStatus.registry ? (
+              <div className="muted" style={{ fontSize: "0.9rem", marginBottom: "0.5rem" }}>
+                Company registry: {autoStatus.registry.enabled} enabled of{" "}
+                {autoStatus.registry.total} (
+                {autoStatus.registry.by_provider
+                  .map((row) => `${row.ats_provider} ${row.enabled}/${row.total}`)
+                  .join(", ")}
+                )
+              </div>
+            ) : null}
+            {autoStatus.company_candidates ? (
+              <div className="muted" style={{ fontSize: "0.9rem", marginBottom: "0.5rem" }}>
+                Company candidates —{" "}
+                {Object.entries(autoStatus.company_candidates)
+                  .map(([status, n]) => `${status}: ${n}`)
+                  .join(", ")}
+              </div>
+            ) : null}
+            {autoStatus.profile_evaluations?.length ? (
+              <div className="muted" style={{ fontSize: "0.9rem", marginBottom: "0.5rem" }}>
+                GPT evidence (gpt-fit-v2) by profile generation —{" "}
+                {autoStatus.profile_evaluations
+                  .map(
+                    (row) =>
+                      `${row.profile_id ?? "legacy"}/${row.profile_version ?? "unversioned"} ${row.gpt_decision}: ${row.count}`,
+                  )
+                  .join(", ")}
+              </div>
+            ) : null}
             {latestAuto ? (
               <div className="muted" style={{ fontSize: "0.9rem" }}>
                 Last run metrics — companies:{" "}

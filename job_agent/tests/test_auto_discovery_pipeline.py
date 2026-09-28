@@ -246,7 +246,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             provider=provider,  # type: ignore[arg-type]
             limits=DiscoveryLimits(
                 max_companies=1,
-                max_candidates_per_company=10,
+                max_listings_per_company=10,
                 max_evals_per_run=10,
                 max_batches_per_run=2,
                 max_jobs_per_batch=10,
@@ -265,7 +265,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             any(name == "submit_discovery_batch" for name, _ in store.calls)
         )
 
-    async def test_quota_exhaustion_pauses_and_fails_company_run(self):
+    async def test_quota_exhaustion_pauses_and_defers_company_run(self):
         store = FakeStore()
         provider = FakeProvider("quota")
         pipeline = AutomaticDiscoveryPipeline(
@@ -281,14 +281,21 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             metrics = await pipeline.run()
         self.assertEqual(provider.calls, 1)
         self.assertEqual(metrics.batches_submitted, 0)
+        self.assertEqual(metrics.companies_failed, 0)
+        self.assertEqual(metrics.companies_deferred, 1)
         finish = [p for n, p in store.calls if n == "finish_automatic_discovery_run"][0]
         self.assertEqual(finish["status"], "partial")
         self.assertTrue(finish["metrics"]["quota_exhausted"])
-        self.assertTrue(
+        # Provider quota is not a company failure: no backoff, candidate preserved.
+        self.assertFalse(
             any(name == "fail_discovery_company_run" for name, _ in store.calls)
         )
-        self.assertFalse(
-            any(name == "complete_discovery_company_run" for name, _ in store.calls)
+        completes = [p for n, p in store.calls if n == "complete_discovery_company_run"]
+        self.assertEqual(len(completes), 1)
+        self.assertTrue(completes[0]["deferred"])
+        self.assertEqual(completes[0]["metrics"]["deferred_reason"], "llm_unavailable")
+        self.assertIn(
+            "preserve_pending_discovery_evaluations", [n for n, _ in store.calls]
         )
 
     async def test_max_evals_reached_defers_without_company_failure(self):
@@ -309,7 +316,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             provider=provider,  # type: ignore[arg-type]
             limits=DiscoveryLimits(
                 max_companies=1,
-                max_candidates_per_company=10,
+                max_listings_per_company=10,
                 max_evals_per_run=1,
                 max_batches_per_run=2,
                 max_jobs_per_batch=10,
@@ -356,7 +363,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             provider=provider,  # type: ignore[arg-type]
             limits=DiscoveryLimits(
                 max_companies=1,
-                max_candidates_per_company=10,
+                max_listings_per_company=10,
                 max_evals_per_run=10,
                 max_batches_per_run=2,
                 max_jobs_per_batch=10,

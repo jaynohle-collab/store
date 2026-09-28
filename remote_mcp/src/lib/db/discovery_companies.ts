@@ -126,7 +126,7 @@ export const finishAutomaticDiscoveryRunSchema = z
   })
   .strict();
 
-function sanitizeErrorSummary(value: string): string {
+export function sanitizeErrorSummary(value: string): string {
   return value
     .replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, "$1[REDACTED]")
     .replace(/(api[_-]?key["']?\s*[:=]\s*["']?)[^"'\s]+/gi, "$1[REDACTED]")
@@ -785,8 +785,57 @@ export async function getAutomaticDiscoveryStatus() {
       AND active_run_id IS NULL
   `;
 
+  const registry = await sql`
+    SELECT ats_provider,
+           COUNT(*)::int AS total,
+           COUNT(*) FILTER (WHERE enabled)::int AS enabled
+    FROM discovery_companies
+    GROUP BY ats_provider
+    ORDER BY ats_provider
+  `;
+  const registryRows = (registry as Record<string, unknown>[]).map((row) => ({
+    ats_provider: String(row.ats_provider),
+    total: Number(row.total || 0),
+    enabled: Number(row.enabled || 0),
+  }));
+
+  // Migration 012 objects: degrade gracefully until it is applied.
+  let candidateCounts: Record<string, number> | null = null;
+  let profileEvaluations: Array<{
+    profile_id: string | null;
+    profile_version: string | null;
+    gpt_decision: string;
+    count: number;
+  }> = [];
+  try {
+    const { getCompanyExpansionSummary } = await import("./discovery_company_candidates");
+    candidateCounts = await getCompanyExpansionSummary();
+    const evals = await sql`
+      SELECT profile_id, profile_version, gpt_decision, COUNT(*)::int AS n
+      FROM discovery_gpt_evaluations
+      WHERE evaluation_version = 'gpt-fit-v2'
+      GROUP BY profile_id, profile_version, gpt_decision
+      ORDER BY profile_id NULLS FIRST, profile_version NULLS FIRST, gpt_decision
+    `;
+    profileEvaluations = (evals as Record<string, unknown>[]).map((row) => ({
+      profile_id: row.profile_id == null ? null : String(row.profile_id),
+      profile_version: row.profile_version == null ? null : String(row.profile_version),
+      gpt_decision: String(row.gpt_decision),
+      count: Number(row.n || 0),
+    }));
+  } catch {
+    candidateCounts = null;
+  }
+
   return {
     latest_runs: (latestRuns as Record<string, unknown>[]).map((row) => mapRow(row)),
+    registry: {
+      total: registryRows.reduce((sum, row) => sum + row.total, 0),
+      enabled: registryRows.reduce((sum, row) => sum + row.enabled, 0),
+      by_provider: registryRows,
+    },
+    company_candidates: candidateCounts,
+    profile_evaluations: profileEvaluations,
     pending_batches: Number((pendingBatches as Record<string, unknown>[])[0]?.count || 0),
     failed_batches: Number((failedBatches as Record<string, unknown>[])[0]?.count || 0),
     due_companies: Number((dueCompanies as Record<string, unknown>[])[0]?.count || 0),

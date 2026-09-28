@@ -31,6 +31,8 @@ class BaseAtsAdapter:
     def __init__(self, http: SafeHttpClient | None = None):
         self.http = http or SafeHttpClient()
         self._owns_http = http is None
+        # Listing breadth bound for paginated ATS APIs (None = adapter default).
+        self.max_listings: int | None = None
 
     def close(self) -> None:
         if self._owns_http:

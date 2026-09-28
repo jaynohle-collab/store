@@ -311,6 +311,7 @@ export async function loadDiscoveryPreflightIndex(
       ),
     ],
     evaluationVersion: input.evaluation_version,
+    profile: input.profile ?? null,
   });
   index.gptByNormalizedUrl = gptLookup.byNormalizedUrl;
   index.gptBySourceExternal = gptLookup.bySourceExternal;

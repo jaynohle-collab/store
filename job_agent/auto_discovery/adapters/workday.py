@@ -97,6 +97,8 @@ class WorkdayAdapter(BaseAtsAdapter):
         offset = 0
         page_size = 20
         max_pages = 25
+        if self.max_listings:
+            max_pages = max(1, min(max_pages, -(-self.max_listings // page_size)))
 
         for _ in range(max_pages):
             response = self.http.post(

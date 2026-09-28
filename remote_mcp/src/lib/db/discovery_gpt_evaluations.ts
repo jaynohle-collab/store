@@ -12,9 +12,12 @@ import { getSql } from "./client";
 import {
   gptEvaluationIdempotencyFingerprint,
   normalizeGptEvaluationRecord,
+  profileGenerationFilterSchema,
   recordDiscoveryEvaluationsSchema,
   type DiscoveryGptEvaluationInput,
+  type ProfileGenerationFilter,
 } from "../discovery/gpt_evaluation";
+import { normalizeJobUrl } from "../discovery/normalize";
 import type { PreflightGptEvaluationRow } from "../discovery/preflight";
 
 function mapRow<T extends Record<string, unknown>>(row: Record<string, unknown>): T {
@@ -165,7 +168,13 @@ function fingerprintFromStoredRow(row: Record<string, unknown>): string {
         ? null
         : (String(row.posting_status) as DiscoveryGptEvaluationInput["posting_status"]),
     posting_status_verified_at:
-      row.posting_status_verified_at == null ? null : String(row.posting_status_verified_at),
+      row.posting_status_verified_at == null
+        ? null
+        : row.posting_status_verified_at instanceof Date
+          ? row.posting_status_verified_at.toISOString()
+          : String(row.posting_status_verified_at),
+    profile_id: row.profile_id == null ? null : String(row.profile_id),
+    profile_version: row.profile_version == null ? null : String(row.profile_version),
     normalized_url: row.normalized_url == null ? null : String(row.normalized_url),
   };
   return gptEvaluationIdempotencyFingerprint(normalized);
@@ -194,6 +203,8 @@ function toPublicRecord(row: DiscoveryGptEvaluationRecord): DiscoveryGptEvaluati
     normalization_version: row.normalization_version ?? null,
     posting_status: row.posting_status ?? null,
     posting_status_verified_at: row.posting_status_verified_at ?? null,
+    profile_id: row.profile_id ?? null,
+    profile_version: row.profile_version ?? null,
     evaluated_at: row.evaluated_at ?? null,
     created_at: row.created_at,
   };
@@ -225,6 +236,8 @@ function toMemoryRow(
     normalization_version: normalized.normalization_version ?? null,
     posting_status: normalized.posting_status ?? null,
     posting_status_verified_at: normalized.posting_status_verified_at ?? null,
+    profile_id: normalized.profile_id ?? null,
+    profile_version: normalized.profile_version ?? null,
     evaluated_at: normalized.evaluated_at ?? null,
     created_at: createdAt,
   };
@@ -325,7 +338,9 @@ async function recordOneSql(
         normalization_version,
         posting_status,
         posting_status_verified_at,
-        evaluated_at
+        evaluated_at,
+        profile_id,
+        profile_version
       ) VALUES (
         ${record.client_evaluation_id}::uuid,
         ${record.client_candidate_id},
@@ -347,7 +362,9 @@ async function recordOneSql(
         ${record.normalization_version ?? null},
         ${record.posting_status ?? null},
         ${record.posting_status_verified_at ? new Date(record.posting_status_verified_at) : null},
-        ${evaluatedAt}
+        ${evaluatedAt},
+        ${record.profile_id ?? null},
+        ${record.profile_version ?? null}
       )
       RETURNING *
     `;
@@ -474,6 +491,7 @@ export async function loadLatestGptEvaluationsForPreflight(params: {
   sources: string[];
   externalJobIds: string[];
   evaluationVersion?: string;
+  profile?: ProfileGenerationFilter | null;
 }): Promise<{
   byNormalizedUrl: Map<string, PreflightGptEvaluationRow>;
   bySourceExternal: Map<string, PreflightGptEvaluationRow>;
@@ -486,9 +504,13 @@ export async function loadLatestGptEvaluationsForPreflight(params: {
     evaluationVersion,
   } = params;
   const versionFilter = evaluationVersion?.trim() || null;
+  const profileId = params.profile?.profile_id ?? null;
+  const profileVersion = params.profile?.profile_version ?? null;
+  const includeLegacy = Boolean(params.profile?.include_legacy_unversioned);
 
   if (useMemoryBackend) {
     const rows = memoryEvaluations
+      .filter((row) => matchesProfileGeneration(row, params.profile ?? null))
       .map((row) => mapGptPreflightRow(row))
       .filter((row) => (versionFilter ? row.evaluation_version === versionFilter : true));
     const urlWanted = new Set(normalizedUrls);
@@ -510,30 +532,23 @@ export async function loadLatestGptEvaluationsForPreflight(params: {
 
   if (normalizedUrls.length) {
     const sql = getSql();
-    const rows = versionFilter
-      ? await sql`
-          SELECT DISTINCT ON (normalized_url)
-            id, normalized_url, source, external_job_id, gpt_relevance_score, gpt_decision,
-            hard_rejection_reason, reasoning_summary, evaluation_version, description_hash,
-            remote_scope, direct_posting_url_verified, normalization_version,
-            posting_status, posting_status_verified_at,
-            evaluated_at, created_at
-          FROM discovery_gpt_evaluations
-          WHERE normalized_url = ANY(${normalizedUrls})
-            AND evaluation_version = ${versionFilter}
-          ORDER BY normalized_url, created_at DESC, id DESC
-        `
-      : await sql`
-          SELECT DISTINCT ON (normalized_url)
-            id, normalized_url, source, external_job_id, gpt_relevance_score, gpt_decision,
-            hard_rejection_reason, reasoning_summary, evaluation_version, description_hash,
-            remote_scope, direct_posting_url_verified, normalization_version,
-            posting_status, posting_status_verified_at,
-            evaluated_at, created_at
-          FROM discovery_gpt_evaluations
-          WHERE normalized_url = ANY(${normalizedUrls})
-          ORDER BY normalized_url, created_at DESC, id DESC
-        `;
+    const rows = await sql`
+      SELECT DISTINCT ON (normalized_url)
+        id, normalized_url, source, external_job_id, gpt_relevance_score, gpt_decision,
+        hard_rejection_reason, reasoning_summary, evaluation_version, description_hash,
+        remote_scope, direct_posting_url_verified, normalization_version,
+        posting_status, posting_status_verified_at,
+        evaluated_at, created_at
+      FROM discovery_gpt_evaluations
+      WHERE normalized_url = ANY(${normalizedUrls})
+        AND (${versionFilter}::text IS NULL OR evaluation_version = ${versionFilter})
+        AND (
+          ${profileId}::text IS NULL
+          OR (profile_id = ${profileId} AND profile_version = ${profileVersion})
+          OR (${includeLegacy}::boolean AND profile_id IS NULL AND profile_version IS NULL)
+        )
+      ORDER BY normalized_url, created_at DESC, id DESC
+    `;
     for (const raw of rows) {
       const row = mapGptPreflightRow(raw as Record<string, unknown>);
       if (row.normalized_url) byNormalizedUrl.set(row.normalized_url, row);
@@ -542,32 +557,24 @@ export async function loadLatestGptEvaluationsForPreflight(params: {
 
   if (sources.length && externalJobIds.length) {
     const sql = getSql();
-    const rows = versionFilter
-      ? await sql`
-          SELECT DISTINCT ON (source, external_job_id)
-            id, normalized_url, source, external_job_id, gpt_relevance_score, gpt_decision,
-            hard_rejection_reason, reasoning_summary, evaluation_version, description_hash,
-            remote_scope, direct_posting_url_verified, normalization_version,
-            posting_status, posting_status_verified_at,
-            evaluated_at, created_at
-          FROM discovery_gpt_evaluations
-          WHERE source = ANY(${sources})
-            AND external_job_id = ANY(${externalJobIds})
-            AND evaluation_version = ${versionFilter}
-          ORDER BY source, external_job_id, created_at DESC, id DESC
-        `
-      : await sql`
-          SELECT DISTINCT ON (source, external_job_id)
-            id, normalized_url, source, external_job_id, gpt_relevance_score, gpt_decision,
-            hard_rejection_reason, reasoning_summary, evaluation_version, description_hash,
-            remote_scope, direct_posting_url_verified, normalization_version,
-            posting_status, posting_status_verified_at,
-            evaluated_at, created_at
-          FROM discovery_gpt_evaluations
-          WHERE source = ANY(${sources})
-            AND external_job_id = ANY(${externalJobIds})
-          ORDER BY source, external_job_id, created_at DESC, id DESC
-        `;
+    const rows = await sql`
+      SELECT DISTINCT ON (source, external_job_id)
+        id, normalized_url, source, external_job_id, gpt_relevance_score, gpt_decision,
+        hard_rejection_reason, reasoning_summary, evaluation_version, description_hash,
+        remote_scope, direct_posting_url_verified, normalization_version,
+        posting_status, posting_status_verified_at,
+        evaluated_at, created_at
+      FROM discovery_gpt_evaluations
+      WHERE source = ANY(${sources})
+        AND external_job_id = ANY(${externalJobIds})
+        AND (${versionFilter}::text IS NULL OR evaluation_version = ${versionFilter})
+        AND (
+          ${profileId}::text IS NULL
+          OR (profile_id = ${profileId} AND profile_version = ${profileVersion})
+          OR (${includeLegacy}::boolean AND profile_id IS NULL AND profile_version IS NULL)
+        )
+      ORDER BY source, external_job_id, created_at DESC, id DESC
+    `;
     const wanted = new Set(sourceExternalKeys);
     for (const raw of rows) {
       const row = mapGptPreflightRow(raw as Record<string, unknown>);
@@ -579,6 +586,231 @@ export async function loadLatestGptEvaluationsForPreflight(params: {
   }
 
   return { byNormalizedUrl, bySourceExternal };
+}
+
+function matchesProfileGeneration(
+  row: Record<string, unknown>,
+  profile: ProfileGenerationFilter | null,
+): boolean {
+  if (!profile) return true;
+  const rowProfileId = row.profile_id == null ? null : String(row.profile_id);
+  const rowProfileVersion = row.profile_version == null ? null : String(row.profile_version);
+  if (rowProfileId === profile.profile_id && rowProfileVersion === profile.profile_version) {
+    return true;
+  }
+  return (
+    Boolean(profile.include_legacy_unversioned) &&
+    rowProfileId === null &&
+    rowProfileVersion === null
+  );
+}
+
+export const lookupDiscoveryEvaluationStatesSchema = z
+  .object({
+    evaluation_version: z.string().min(1).max(64),
+    profile: profileGenerationFilterSchema,
+    candidates: z
+      .array(
+        z
+          .object({
+            client_candidate_id: z.string().min(1).max(128),
+            url: z.string().min(1).max(2048),
+            source: z.string().min(1).max(128),
+            external_job_id: z.string().max(256).optional().default(""),
+          })
+          .strict(),
+      )
+      .min(1)
+      .max(200),
+  })
+  .strict();
+
+export type DiscoveryEvaluationState = {
+  client_candidate_id: string;
+  matched_by: "normalized_url" | "source_external_id" | null;
+  evaluation: {
+    evaluation_id: string;
+    client_evaluation_id: string;
+    gpt_decision: string;
+    gpt_relevance_score: number;
+    description_hash: string | null;
+    evaluated_at: string | null;
+    created_at: string;
+    profile_id: string | null;
+    profile_version: string | null;
+  } | null;
+  /** Evidence already attached to a pending/processing/completed inbox batch. */
+  submitted_to_inbox: boolean;
+};
+
+type StateRow = {
+  id: string;
+  client_evaluation_id: string;
+  normalized_url: string | null;
+  source: string;
+  external_job_id: string | null;
+  gpt_decision: string;
+  gpt_relevance_score: number;
+  description_hash: string | null;
+  evaluated_at: string | null;
+  created_at: string;
+  profile_id: string | null;
+  profile_version: string | null;
+};
+
+function toStateRow(row: Record<string, unknown>): StateRow {
+  const iso = (value: unknown) =>
+    value == null ? null : value instanceof Date ? value.toISOString() : String(value);
+  return {
+    id: String(row.id),
+    client_evaluation_id: String(row.client_evaluation_id),
+    normalized_url: row.normalized_url == null ? null : String(row.normalized_url),
+    source: String(row.source),
+    external_job_id: row.external_job_id == null ? null : String(row.external_job_id),
+    gpt_decision: String(row.gpt_decision),
+    gpt_relevance_score: Number(row.gpt_relevance_score),
+    description_hash: row.description_hash == null ? null : String(row.description_hash),
+    evaluated_at: iso(row.evaluated_at),
+    created_at: iso(row.created_at) ?? "",
+    profile_id: row.profile_id == null ? null : String(row.profile_id),
+    profile_version: row.profile_version == null ? null : String(row.profile_version),
+  };
+}
+
+function isNewerStateRow(candidate: StateRow, existing: StateRow): boolean {
+  if (candidate.created_at !== existing.created_at) {
+    return candidate.created_at > existing.created_at;
+  }
+  return candidate.id > existing.id;
+}
+
+/**
+ * Read-only: latest stored GPT evidence per candidate for one profile generation.
+ * Used by the automatic producer to rank new/changed listings ahead of already
+ * evaluated ones before any full-description fetch or LLM call.
+ */
+export async function lookupDiscoveryEvaluationStates(
+  raw: z.input<typeof lookupDiscoveryEvaluationStatesSchema>,
+): Promise<{ states: DiscoveryEvaluationState[] }> {
+  const input = lookupDiscoveryEvaluationStatesSchema.parse(raw);
+  const candidates = input.candidates.map((candidate) => ({
+    ...candidate,
+    normalized_url: normalizeJobUrl(candidate.url),
+    external_job_id: candidate.external_job_id.trim(),
+  }));
+  const urls = [
+    ...new Set(candidates.map((c) => c.normalized_url).filter((u): u is string => Boolean(u))),
+  ];
+  const sources = [...new Set(candidates.filter((c) => c.external_job_id).map((c) => c.source))];
+  const externals = [
+    ...new Set(candidates.map((c) => c.external_job_id).filter((e) => Boolean(e))),
+  ];
+
+  let rows: StateRow[];
+  if (useMemoryBackend) {
+    const urlSet = new Set(urls);
+    const pairSet = new Set(
+      candidates.filter((c) => c.external_job_id).map((c) => `${c.source}\0${c.external_job_id}`),
+    );
+    rows = memoryEvaluations
+      .filter((row) => row.evaluation_version === input.evaluation_version)
+      .filter((row) => matchesProfileGeneration(row, input.profile))
+      .filter(
+        (row) =>
+          (row.normalized_url && urlSet.has(row.normalized_url)) ||
+          (row.external_job_id && pairSet.has(`${row.source}\0${row.external_job_id}`)),
+      )
+      .map((row) => toStateRow(row));
+  } else {
+    const sql = getSql();
+    const found = await sql`
+      SELECT id, client_evaluation_id, normalized_url, source, external_job_id,
+             gpt_decision, gpt_relevance_score, description_hash, evaluated_at,
+             created_at, profile_id, profile_version
+      FROM discovery_gpt_evaluations
+      WHERE evaluation_version = ${input.evaluation_version}
+        AND (
+          (profile_id = ${input.profile.profile_id}
+            AND profile_version = ${input.profile.profile_version})
+          OR (${input.profile.include_legacy_unversioned}::boolean
+            AND profile_id IS NULL AND profile_version IS NULL)
+        )
+        AND (
+          normalized_url = ANY(${urls})
+          OR (source = ANY(${sources}) AND external_job_id = ANY(${externals}))
+        )
+    `;
+    rows = (found as Record<string, unknown>[]).map(toStateRow);
+  }
+
+  const byUrl = new Map<string, StateRow>();
+  const byPair = new Map<string, StateRow>();
+  for (const row of rows) {
+    if (row.normalized_url) {
+      const existing = byUrl.get(row.normalized_url);
+      if (!existing || isNewerStateRow(row, existing)) byUrl.set(row.normalized_url, row);
+    }
+    const external = row.external_job_id?.trim();
+    if (external) {
+      const key = `${row.source}\0${external}`;
+      const existing = byPair.get(key);
+      if (!existing || isNewerStateRow(row, existing)) byPair.set(key, row);
+    }
+  }
+
+  const matches = candidates.map((candidate) => {
+    const viaUrl = candidate.normalized_url ? byUrl.get(candidate.normalized_url) : undefined;
+    if (viaUrl) return { candidate, row: viaUrl, matched_by: "normalized_url" as const };
+    const viaPair = candidate.external_job_id
+      ? byPair.get(`${candidate.source}\0${candidate.external_job_id}`)
+      : undefined;
+    if (viaPair) return { candidate, row: viaPair, matched_by: "source_external_id" as const };
+    return { candidate, row: null, matched_by: null };
+  });
+
+  const evaluationIds = [
+    ...new Set(matches.map((m) => m.row?.id).filter((id): id is string => Boolean(id))),
+  ];
+  const submitted = new Set<string>();
+  if (evaluationIds.length && !useMemoryBackend) {
+    const sql = getSql();
+    const attached = await sql`
+      SELECT DISTINCT j.value->'gpt_evaluation'->>'evaluation_id' AS evaluation_id
+      FROM discovery_inbox_batches b
+      CROSS JOIN LATERAL jsonb_array_elements(
+        CASE WHEN jsonb_typeof(b.payload->'jobs') = 'array'
+          THEN b.payload->'jobs' ELSE '[]'::jsonb END
+      ) AS j(value)
+      -- 'reverted' counts as attached: an audited revert must not be undone by
+      -- automatic resubmission of the same evidence.
+      WHERE b.status IN ('pending', 'processing', 'completed', 'reverted')
+        AND j.value->'gpt_evaluation'->>'evaluation_id' = ANY(${evaluationIds})
+    `;
+    for (const row of attached as Record<string, unknown>[]) {
+      if (row.evaluation_id) submitted.add(String(row.evaluation_id));
+    }
+  }
+
+  return {
+    states: matches.map(({ candidate, row, matched_by }) => ({
+      client_candidate_id: candidate.client_candidate_id,
+      matched_by,
+      evaluation: row
+        ? {
+            evaluation_id: row.id,
+            client_evaluation_id: row.client_evaluation_id,
+            gpt_decision: row.gpt_decision,
+            gpt_relevance_score: row.gpt_relevance_score,
+            description_hash: row.description_hash,
+            evaluated_at: row.evaluated_at,
+            created_at: row.created_at,
+            profile_id: row.profile_id,
+            profile_version: row.profile_version,
+          }
+        : null,
+      submitted_to_inbox: row ? submitted.has(row.id) : false,
+    })),
+  };
 }
 
 export { recordDiscoveryEvaluationsSchema } from "../discovery/gpt_evaluation";

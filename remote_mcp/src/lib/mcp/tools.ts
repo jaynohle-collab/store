@@ -17,6 +17,7 @@ import { registerInboxTools } from "./inbox_tools";
 import { registerRotationTools } from "./rotation_tools";
 import { registerAutomaticDiscoveryTools } from "./automatic_discovery_tools";
 import { registerDiscoveryGptEvaluationTools } from "./discovery_gpt_evaluation_tools";
+import { registerCompanyExpansionTools } from "./company_expansion_tools";
 import {
   registerDiscoveryBatchRevertTools,
   registerDiscoveryBatchWorkerTools,
@@ -50,6 +51,7 @@ export function registerJobTools(server: McpServer): void {
   registerRotationTools(server);
   registerAutomaticDiscoveryTools(server);
   registerDiscoveryGptEvaluationTools(server);
+  registerCompanyExpansionTools(server);
   registerDiscoveryBatchRevertTools(server);
   registerDiscoveryBatchWorkerTools(server);
 

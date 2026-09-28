@@ -42,6 +42,7 @@ export const TOOL_PERMISSIONS: Record<string, JobScope> = {
   check_discovery_candidates: SCOPES.READ,
   compute_discovery_description_hashes: SCOPES.READ,
   get_discovery_evaluation_by_client_id: SCOPES.READ,
+  lookup_discovery_evaluation_states: SCOPES.READ,
   record_discovery_evaluations: SCOPES.WRITE,
   record_application: SCOPES.WRITE,
   get_application: SCOPES.READ,
@@ -84,6 +85,12 @@ export const TOOL_PERMISSIONS: Record<string, JobScope> = {
   preserve_pending_discovery_evaluations: SCOPES.WORKER,
   claim_pending_discovery_evaluations: SCOPES.WORKER,
   complete_pending_discovery_evaluation: SCOPES.WORKER,
+  // Automatic company expansion (verified candidates -> registry)
+  list_discovery_company_candidates: SCOPES.READ,
+  list_discovery_posting_url_hints: SCOPES.READ,
+  upsert_discovery_company_candidates: SCOPES.WORKER,
+  claim_discovery_company_candidates: SCOPES.WORKER,
+  record_discovery_company_verification: SCOPES.WORKER,
   // Audited batch revert (ChatGPT / operators — dedicated scope)
   preview_discovery_batch_revert: SCOPES.READ,
   revert_discovery_batch: SCOPES.REVERT,

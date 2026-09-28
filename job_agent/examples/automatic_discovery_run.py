@@ -55,13 +55,16 @@ async def run_async(args: argparse.Namespace) -> int:
     )
     metrics = await pipeline.run()
     logger.info(
-        "automatic discovery finished: claimed=%s completed=%s failed=%s "
-        "listed=%s evaluated=%s qualified=%s batches=%s",
+        "automatic discovery finished: claimed=%s completed=%s deferred=%s failed=%s "
+        "listed=%s selected=%s evaluated=%s reused=%s qualified=%s batches=%s",
         metrics.companies_claimed,
         metrics.companies_completed,
+        metrics.companies_deferred,
         metrics.companies_failed,
         metrics.candidates_listed,
+        metrics.candidates_selected,
         metrics.candidates_evaluated,
+        metrics.stored_reused,
         metrics.candidates_qualified,
         metrics.batches_submitted,
     )

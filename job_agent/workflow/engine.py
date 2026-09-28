@@ -20,7 +20,11 @@ from ..lifecycle import (
     process_discovered_job,
 )
 from ..lifecycle.atomic_apply import build_atomic_apply_fields
-from ..lifecycle.evaluation_service import EvaluationService
+from ..lifecycle.evaluation_service import (
+    PROFILE_VERSION,
+    SCORING_VERSION,
+    EvaluationService,
+)
 from ..lifecycle.process import DiscoveryRunTracker
 from ..lifecycle.types import PostingDisposition
 
@@ -271,10 +275,10 @@ class JobSearchWorkflow:
         }
         if self.defer_lifecycle_persist:
             scoring_version = getattr(
-                self.evaluation_service, "scoring_version", "profile-v1"
+                self.evaluation_service, "scoring_version", SCORING_VERSION
             )
             profile_version = getattr(
-                self.evaluation_service, "profile_version", "jay-ai-v1"
+                self.evaluation_service, "profile_version", PROFILE_VERSION
             )
             provenance.update(
                 build_atomic_apply_fields(

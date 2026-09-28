@@ -552,12 +552,12 @@ export async function getDashboardSummary(
     ),
     posting_app AS (
       SELECT DISTINCT ON (posting_id)
-        posting_id, status
+        posting_id, id AS application_id, status AS application_status
       FROM applications
-      ORDER BY posting_id, COALESCE(applied_at, created_at) DESC
+      ORDER BY posting_id, COALESCE(applied_at, created_at) DESC, created_at DESC
     ),
     today_postings AS (
-      SELECT p.*, le.match_score, pa.status AS application_status
+      SELECT p.*, le.match_score, pa.application_status
       FROM job_postings p
       LEFT JOIN latest_eval le ON le.posting_id = p.id
       LEFT JOIN posting_app pa ON pa.posting_id = p.id

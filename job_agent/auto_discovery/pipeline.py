@@ -1,9 +1,24 @@
-"""Automatic discovery producer pipeline."""
+"""Automatic discovery producer pipeline.
+
+Per claimed company:
+
+1. List lightweight postings from the official ATS (bounded).
+2. Structural + persona deterministic rejects (no network, no LLM).
+3. Pre-rank by persona score and keep ``max_listings_per_company``.
+4. Identity preflight (known postings, prior applications, duplicates) and
+   stored-evidence lookup for the active profile generation.
+5. Deterministic rank with novelty tiers; select the top 3–5.
+6. Fetch full descriptions only for selected listings, then evaluate or reuse
+   stored evidence. New LLM calls are bounded globally by ``max_evals_per_run``;
+   selected candidates beyond the budget are preserved in the pending queue.
+"""
 
 from __future__ import annotations
 
 import logging
+import time
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from job_agent.auto_discovery.adapters.registry import get_adapter
@@ -22,6 +37,19 @@ from job_agent.auto_discovery.evaluate.providers import (
 )
 from job_agent.auto_discovery.http_client import SafeHttpClient
 from job_agent.auto_discovery.limits import DiscoveryLimits
+from job_agent.auto_discovery.ranking import (
+    OUTCOME_NO_EVIDENCE,
+    OUTCOME_REUSED,
+    SELECTION_MEMORY_KEY,
+    StoredEvaluationState,
+    candidate_key,
+    load_selection_memory,
+    persona_reject_reason,
+    profile_score,
+    rank_listings,
+    remember,
+    trim_selection_memory,
+)
 from job_agent.auto_discovery.types import (
     AdapterError,
     CompanyRecord,
@@ -30,14 +58,22 @@ from job_agent.auto_discovery.types import (
 )
 from job_agent.lifecycle.url import normalize_url
 from job_agent.memory.fingerprint import compute_description_hash
+from job_agent.models.types import JobSearchProfile
+from job_agent.profile.identity import ProfileIdentity, identity_of, load_active_profile
 
 logger = logging.getLogger(__name__)
 
 # Namespace for deterministic client_evaluation_id (UUIDv5).
 _EVAL_ID_NAMESPACE = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
 _PREFLIGHT_CHUNK = 100
+_STATE_LOOKUP_CHUNK = 200
 # Server-side idempotency rejection from record_discovery_evaluations.
 _IDEMPOTENCY_CONFLICT_MARKER = "already exists with a different evaluation payload"
+# Rough prompt overhead for usage estimates (system prompt + rubric).
+_PROMPT_OVERHEAD_TOKENS = 900
+
+EVAL_REUSED = "reused"
+EVAL_EVALUATED = "evaluated"
 
 
 class StoredEvaluationMismatchError(RuntimeError):
@@ -55,24 +91,37 @@ class AutomaticDiscoveryPipeline:
         max_companies: int | None = None,
         worker_identity: str = "automatic-discovery",
         client_evaluation_id_factory: Callable[[str], str] | None = None,
+        profile: JobSearchProfile | None = None,
     ):
         self.store = store
         self.provider = provider
-        self.http = http
         self.limits = limits or DiscoveryLimits.from_env(
             max_companies_override=max_companies
         )
+        self.http = http
+        self._owns_http = http is None
         self.worker_identity = worker_identity
         self.client_evaluation_id_factory = client_evaluation_id_factory
+        self.profile = profile or load_active_profile()
+        self.identity: ProfileIdentity = identity_of(self.profile)
         self.metrics = RunMetrics()
         self._quota_exhausted = False
         self._paused_reason: str | None = None
         self._pending_claims: list[CompanyRecord] = []
+        # Evaluation ids already attached to pending/processing/completed inbox batches.
+        self._already_submitted: set[str] = set()
+        self._started = time.monotonic()
         self.metrics_extra: dict[str, Any] = {
             "pending_preserved": 0,
             "pending_resumed": 0,
             "pending_completed": 0,
+            "pending_eval_reused": 0,
         }
+
+    def _http_client(self) -> SafeHttpClient:
+        if self.http is None:
+            self.http = SafeHttpClient(max_response_bytes=self.limits.max_response_bytes)
+        return self.http
 
     async def run(self) -> RunMetrics:
         provider = self.provider or resolve_provider()
@@ -119,10 +168,10 @@ class AutomaticDiscoveryPipeline:
             await self._submit_batches(qualified_jobs)
             if self._quota_exhausted or self._paused_reason in {
                 "max_evals_reached",
-                "all_providers_unavailable",
+                "max_batches_reached",
             }:
                 status = "partial"
-            elif not qualified_jobs and self.metrics.companies_failed:
+            elif self.metrics.companies_failed or self.metrics.companies_deferred:
                 status = "partial"
         except Exception as exc:
             status = "failed"
@@ -138,28 +187,52 @@ class AutomaticDiscoveryPipeline:
                     {
                         "run_id": run_id,
                         "status": finish_status,
-                        "metrics": {
-                            **self.metrics.as_dict(),
-                            **self.metrics_extra,
-                            "quota_exhausted": self._quota_exhausted,
-                            "paused_reason": self._paused_reason,
-                            "companies_scanned": self.metrics.companies_completed
-                            + self.metrics.companies_failed,
-                            "candidates_found": self.metrics.candidates_listed,
-                            "qualified": self.metrics.candidates_qualified,
-                            "submitted": self.metrics.batches_submitted,
-                        },
+                        "metrics": self._run_metrics_payload(),
                         "error_summary": self._paused_reason
                         or (self.metrics.errors[0] if self.metrics.errors else None),
                         "llm_provider": getattr(provider, "name", None),
                     }
                 )
+            if self._owns_http and self.http is not None:
+                self.http.close()
         return self.metrics
+
+    def _run_metrics_payload(self) -> dict[str, Any]:
+        http_stats = dict(self.http.stats) if self.http is not None else {}
+        self.metrics.listing_requests = int(http_stats.get("requests", 0))
+        self.metrics.rate_limit_responses = int(http_stats.get("rate_limited", 0))
+        self.metrics.http_retries = int(http_stats.get("retries", 0))
+        self.metrics.bytes_downloaded = int(http_stats.get("bytes_downloaded", 0))
+        self.metrics.duration_seconds = round(time.monotonic() - self._started, 1)
+        self.metrics.pending_preserved = int(self.metrics_extra["pending_preserved"])
+        return {
+            **self.metrics.as_dict(),
+            **self.metrics_extra,
+            "profile_id": self.identity.profile_id,
+            "profile_version": self.identity.profile_version,
+            "limits": {
+                "max_companies": self.limits.max_companies,
+                "max_listings_per_company": self.limits.max_listings_per_company,
+                "top_candidates_per_company": self.limits.top_candidates_per_company,
+                "max_evals_per_run": self.limits.max_evals_per_run,
+                "max_jobs_per_batch": self.limits.max_jobs_per_batch,
+                "max_batches_per_run": self.limits.max_batches_per_run,
+                "min_rank_score": self.limits.min_rank_score,
+            },
+            "quota_exhausted": self._quota_exhausted,
+            "paused_reason": self._paused_reason,
+            "companies_scanned": self.metrics.companies_completed
+            + self.metrics.companies_failed,
+            "candidates_found": self.metrics.candidates_listed,
+            "qualified": self.metrics.candidates_qualified,
+            "submitted": self.metrics.batches_submitted,
+        }
 
     def _fingerprint(self, cand: LightweightCandidate) -> str:
         return (
             f"{EVALUATION_VERSION}|{cand.source}|{cand.external_job_id}|"
             f"{cand.url}|{cand.description_hash}"
+            f"{self.identity.evaluation_seed_suffix()}"
         )
 
     def _pending_item(
@@ -233,8 +306,7 @@ class AutomaticDiscoveryPipeline:
         self.metrics_extra["pending_resumed"] += len(items)
         for row in items:
             if self._quota_exhausted:
-                # Re-preserve unfinished claimed rows as pending via complete abandoned?
-                # Leave lease to expire back to claimable; also push preserve for safety.
+                # Unfinished claimed rows return to the queue when their lease expires.
                 break
             if self.metrics.candidates_evaluated >= self.limits.max_evals_per_run:
                 break
@@ -294,6 +366,8 @@ class AutomaticDiscoveryPipeline:
         """Validate identity fields before reusing a stored evaluation."""
         if str(stored.get("evaluation_version") or "") != EVALUATION_VERSION:
             return False
+        if not self.identity.matches_stored(stored):
+            return False
         if str(stored.get("source") or "") != str(cand.source or ""):
             return False
         if str(stored.get("external_job_id") or "") != str(cand.external_job_id or ""):
@@ -337,15 +411,16 @@ class AutomaticDiscoveryPipeline:
         cand: LightweightCandidate,
         provider: EvaluationProvider,
         qualified_jobs: list[dict[str, Any]],
-    ) -> None:
+    ) -> str:
         """Single evaluation entry point for pending resumes and fresh scans.
 
         Stored evidence for the deterministic client_evaluation_id is reused
         before any LLM request; otherwise evaluate, persist, then count.
+        Returns ``EVAL_REUSED`` or ``EVAL_EVALUATED``.
         """
         if await self._reuse_stored_evaluation_if_valid(cand, qualified_jobs):
-            return
-        await self._evaluate_and_record(cand, provider, qualified_jobs)
+            return EVAL_REUSED
+        return await self._evaluate_and_record(cand, provider, qualified_jobs)
 
     async def _lookup_stored_evaluation(
         self, client_id: str
@@ -375,9 +450,8 @@ class AutomaticDiscoveryPipeline:
             evaluation_id=evaluation_id or None,
             qualified_jobs=qualified_jobs,
         )
-        self.metrics_extra["pending_eval_reused"] = (
-            int(self.metrics_extra.get("pending_eval_reused") or 0) + 1
-        )
+        self.metrics_extra["pending_eval_reused"] += 1
+        self.metrics.stored_reused += 1
 
     async def _reuse_stored_evaluation_if_valid(
         self,
@@ -407,12 +481,15 @@ class AutomaticDiscoveryPipeline:
         full: LightweightCandidate,
         provider: EvaluationProvider,
         qualified_jobs: list[dict[str, Any]],
-    ) -> None:
+    ) -> str:
         description = (full.description or "").strip()
+        self.metrics.estimated_llm_tokens += _PROMPT_OVERHEAD_TOKENS + len(description) // 4
         record = evaluate_candidate(provider, full, description)
         # Deterministic id BEFORE record — same fingerprint as pending queue.
         client_id = self._idempotent_client_id(full)
         record["client_evaluation_id"] = client_id
+        record["profile_id"] = self.identity.profile_id
+        record["profile_version"] = self.identity.profile_version
         # LLM was invoked; count the call even if persistence later conflicts.
         self.metrics.llm_calls += 1
 
@@ -438,7 +515,7 @@ class AutomaticDiscoveryPipeline:
                 client_id,
             )
             self._apply_stored_evaluation(stored, full, qualified_jobs)
-            return
+            return EVAL_REUSED
         # Only count a successful evaluation after durable persist.
         self.metrics.candidates_evaluated += 1
         evaluation_id = self._extract_evaluation_id(recorded, record)
@@ -449,15 +526,16 @@ class AutomaticDiscoveryPipeline:
             evaluation_id=evaluation_id,
             qualified_jobs=qualified_jobs,
         )
+        return EVAL_EVALUATED
 
     async def _release_remaining_claims(self) -> None:
-        """Release claims not completed (quota / early stop).
+        """Release claims that were not scanned (capacity / quota / early stop).
 
-        ``max_evals_reached`` is a capacity pause: complete as deferred (no failure
-        backoff). Other stop reasons fail-closed.
+        Capacity and provider-quota pauses complete as deferred: the company is
+        immediately re-claimable and ``consecutive_failures`` is untouched.
+        Other stop reasons fail closed.
         """
-        deferred = self._paused_reason == "max_evals_reached"
-        category = "llm_quota" if self._quota_exhausted else "unknown"
+        deferred = self._paused_reason == "max_evals_reached" or self._quota_exhausted
         summary = self._paused_reason or "run_stopped_before_company_scan"
         for company in list(self._pending_claims):
             if not company.run_id:
@@ -470,14 +548,17 @@ class AutomaticDiscoveryPipeline:
                             "success": True,
                             "deferred": True,
                             "worker_identity": self.worker_identity,
-                            "metrics": {"deferred_reason": "max_evals_reached"},
+                            "metrics": {
+                                "deferred_reason": self._deferral_reason(),
+                            },
                         }
                     )
+                    self.metrics.companies_deferred += 1
                 else:
                     await self.store.fail_discovery_company_run(
                         {
                             "run_id": company.run_id,
-                            "error_category": category,
+                            "error_category": "unknown",
                             "error_summary": summary[:500],
                             "worker_identity": self.worker_identity,
                         }
@@ -491,6 +572,102 @@ class AutomaticDiscoveryPipeline:
                 )
         self._pending_claims = []
 
+    def _deferral_reason(self) -> str:
+        if self._quota_exhausted:
+            return "llm_unavailable"
+        return "max_evals_reached"
+
+    async def _preflight(
+        self, candidates: list[LightweightCandidate]
+    ) -> dict[str, dict[str, Any]]:
+        by_key: dict[str, dict[str, Any]] = {}
+        for i in range(0, len(candidates), _PREFLIGHT_CHUNK):
+            chunk = candidates[i : i + _PREFLIGHT_CHUNK]
+            preflight = await self.store.check_discovery_candidates(
+                {
+                    "evaluation_version": EVALUATION_VERSION,
+                    "profile": self.identity.as_filter(),
+                    "candidates": [c.to_preflight_dict() for c in chunk],
+                }
+            )
+            for r in list((preflight or {}).get("results") or []):
+                if not isinstance(r, dict):
+                    continue
+                key = str(r.get("client_candidate_id") or r.get("url") or "")
+                if key:
+                    by_key[key] = r
+            self.metrics.candidates_preflighted += len(chunk)
+        return by_key
+
+    async def _lookup_states(
+        self, candidates: list[LightweightCandidate]
+    ) -> dict[str, StoredEvaluationState]:
+        if not candidates or not hasattr(
+            self.store, "lookup_discovery_evaluation_states"
+        ):
+            return {}
+        states: dict[str, StoredEvaluationState] = {}
+        for i in range(0, len(candidates), _STATE_LOOKUP_CHUNK):
+            chunk = candidates[i : i + _STATE_LOOKUP_CHUNK]
+            by_client_id = {c.client_candidate_id: c for c in chunk}
+            result = await self.store.lookup_discovery_evaluation_states(
+                {
+                    "evaluation_version": EVALUATION_VERSION,
+                    "profile": self.identity.as_filter(),
+                    "candidates": [
+                        {
+                            "client_candidate_id": c.client_candidate_id,
+                            "url": c.url,
+                            "source": c.source,
+                            "external_job_id": c.external_job_id or "",
+                        }
+                        for c in chunk
+                    ],
+                }
+            )
+            for raw in list((result or {}).get("states") or []):
+                if not isinstance(raw, dict):
+                    continue
+                cand = by_client_id.get(str(raw.get("client_candidate_id") or ""))
+                state = StoredEvaluationState.from_lookup(raw)
+                if cand is not None and state is not None:
+                    states[candidate_key(cand)] = state
+                    if state.submitted_to_inbox and state.evaluation_id:
+                        self._already_submitted.add(state.evaluation_id)
+        return states
+
+    @staticmethod
+    def _with_listing_hash(cand: LightweightCandidate) -> LightweightCandidate:
+        """Hash list-time descriptions (Ashby/Lever) so changes are detectable."""
+        if cand.description_hash or not (cand.description or "").strip():
+            return cand
+        return LightweightCandidate(
+            client_candidate_id=cand.client_candidate_id,
+            company=cand.company,
+            title=cand.title,
+            url=cand.url,
+            source=cand.source,
+            external_job_id=cand.external_job_id,
+            location=cand.location,
+            posted_date=cand.posted_date,
+            description_hash=compute_description_hash((cand.description or "").strip()) or "",
+            description=cand.description,
+        )
+
+    def _skip_after_preflight(self, pf: dict[str, Any]) -> str | None:
+        # Reusable QUALIFIED evidence is not skipped here: the state lookup decides
+        # whether it was already submitted or must be resubmitted without an LLM call.
+        if pf.get("gpt_skip_allowed"):
+            return "stored_evidence"
+        if pf.get("previously_applied"):
+            return "previously_applied"
+        status = str(pf.get("identity_status") or "")
+        if status == "KNOWN_UNCHANGED":
+            return "known_posting"
+        if status == "POSSIBLE_CROSS_SOURCE":
+            return "known_duplicate"
+        return None
+
     async def _scan_company(
         self,
         company: CompanyRecord,
@@ -499,100 +676,166 @@ class AutomaticDiscoveryPipeline:
     ) -> None:
         company_run_id = company.run_id
         company_qualified_before = len(qualified_jobs)
+        today = datetime.now(timezone.utc).date()
+        memory = load_selection_memory(
+            (company.raw.get("company") or {}).get("stats")
+            if isinstance(company.raw.get("company"), dict)
+            else None
+        )
+        company_metrics: dict[str, Any] = {}
         early_stop = False
         try:
-            adapter = get_adapter(company.ats_provider, http=self.http)
+            adapter = get_adapter(company.ats_provider, http=self._http_client())
+            if hasattr(adapter, "max_listings"):
+                adapter.max_listings = self.limits.max_listings_per_company
             listed = adapter.list_jobs(company)
-            candidates = listed[: self.limits.max_candidates_per_company]
-            self.metrics.candidates_listed += len(candidates)
-            kept, rejected = filter_deterministic(candidates)
-            self.metrics.candidates_deterministic_rejected += len(rejected)
+            self.metrics.candidates_listed += len(listed)
 
-            by_key: dict[str, dict[str, Any]] = {}
-            if kept:
-                for i in range(0, len(kept), _PREFLIGHT_CHUNK):
-                    chunk = kept[i : i + _PREFLIGHT_CHUNK]
-                    preflight = await self.store.check_discovery_candidates(
-                        {
-                            "evaluation_version": EVALUATION_VERSION,
-                            "candidates": [c.to_preflight_dict() for c in chunk],
-                        }
-                    )
-                    results = list((preflight or {}).get("results") or [])
-                    for r in results:
-                        if not isinstance(r, dict):
-                            continue
-                        key = str(
-                            r.get("client_candidate_id") or r.get("url") or ""
-                        )
-                        if key:
-                            by_key[key] = r
-                    self.metrics.candidates_preflighted += len(chunk)
-
-            to_evaluate: list[LightweightCandidate] = []
+            kept, rejected = filter_deterministic(listed)
+            persona_ok: list[LightweightCandidate] = []
+            persona_rejected = 0
             for cand in kept:
-                pf = by_key.get(cand.client_candidate_id) or by_key.get(cand.url) or {}
-                if pf.get("gpt_skip_allowed") or pf.get("gpt_reuse_allowed"):
-                    self.metrics.candidates_skipped += 1
-                    continue
-                if str(pf.get("identity_status") or "") in {
-                    "duplicate",
-                    "already_applied",
-                    "known_posting",
-                }:
-                    self.metrics.candidates_skipped += 1
-                    continue
+                if persona_reject_reason(cand, self.profile):
+                    persona_rejected += 1
+                else:
+                    persona_ok.append(cand)
+            self.metrics.candidates_deterministic_rejected += len(rejected) + persona_rejected
+            self.metrics.candidates_normalized += len(persona_ok)
 
-                full = adapter.get_job(company, cand)
-                description = (full.description or cand.description or "").strip()
+            # Listing breadth bound, chosen by persona score (never ATS order).
+            persona_ok.sort(
+                key=lambda c: (-profile_score(c, self.profile), candidate_key(c))
+            )
+            considered = [
+                self._with_listing_hash(c)
+                for c in persona_ok[: self.limits.max_listings_per_company]
+            ]
+
+            preflight = await self._preflight(considered) if considered else {}
+            fresh: list[LightweightCandidate] = []
+            for cand in considered:
+                pf = preflight.get(cand.client_candidate_id) or preflight.get(cand.url) or {}
+                if self._skip_after_preflight(pf):
+                    self.metrics.candidates_skipped += 1
+                    continue
+                fresh.append(cand)
+
+            states = await self._lookup_states(fresh)
+            ranking = rank_listings(
+                fresh,
+                profile=self.profile,
+                states=states,
+                memory=memory,
+                top_k=self.limits.top_candidates_per_company,
+                min_rank_score=self.limits.min_rank_score,
+                today=today,
+            )
+            self.metrics.candidates_deterministic_rejected += len(ranking.rejected)
+            self.metrics.candidates_ranked += len(ranking.ranked)
+            self.metrics.candidates_selected += len(ranking.selected)
+            self.metrics.candidates_unchanged_skipped += len(ranking.unchanged)
+            self.metrics.candidates_below_threshold += len(ranking.below_threshold)
+            company_metrics = {
+                "listed": len(listed),
+                "considered": len(considered),
+                "ranked": len(ranking.ranked),
+                "selected": len(ranking.selected),
+                "unchanged": len(ranking.unchanged),
+                "selected_keys": [r.key for r in ranking.selected],
+            }
+
+            to_evaluate: list[tuple[LightweightCandidate, str]] = []
+            for item in ranking.selected:
+                self.metrics.full_descriptions_requested += 1
+                try:
+                    full = adapter.get_job(company, item.candidate)
+                except AdapterError as exc:
+                    # One bad posting must not fail the company or starve the rest.
+                    self.metrics_extra["detail_fetch_errors"] = (
+                        int(self.metrics_extra.get("detail_fetch_errors", 0)) + 1
+                    )
+                    if exc.category in {"not_found", "validation", "ssrf_blocked"}:
+                        remember(
+                            memory,
+                            item.key,
+                            outcome=OUTCOME_NO_EVIDENCE,
+                            posted_date=item.candidate.posted_date,
+                            today=today,
+                        )
+                    continue
+                description = (full.description or item.candidate.description or "").strip()
                 if not description:
                     self.metrics.candidates_deterministic_rejected += 1
+                    remember(
+                        memory,
+                        item.key,
+                        outcome=OUTCOME_NO_EVIDENCE,
+                        posted_date=item.candidate.posted_date,
+                        today=today,
+                    )
                     continue
-                desc_hash = compute_description_hash(description) or ""
                 to_evaluate.append(
-                    LightweightCandidate(
-                        client_candidate_id=full.client_candidate_id,
-                        company=full.company,
-                        title=full.title,
-                        url=full.url,
-                        source=full.source,
-                        external_job_id=full.external_job_id,
-                        location=full.location,
-                        posted_date=full.posted_date,
-                        description_hash=desc_hash,
-                        description=description,
+                    (
+                        LightweightCandidate(
+                            client_candidate_id=full.client_candidate_id,
+                            company=full.company,
+                            title=full.title,
+                            url=full.url,
+                            source=full.source,
+                            external_job_id=full.external_job_id,
+                            location=full.location,
+                            posted_date=full.posted_date,
+                            description_hash=compute_description_hash(description) or "",
+                            description=description,
+                        ),
+                        item.key,
                     )
                 )
 
-            for index, full in enumerate(to_evaluate):
+            for index, (full, key) in enumerate(to_evaluate):
+                remaining = [c for c, _ in to_evaluate[index:]]
                 if self._quota_exhausted:
                     early_stop = True
                     await self._preserve_candidates(
-                        to_evaluate[index:],
-                        company=company,
-                        reason="providers_unavailable_mid_company",
+                        remaining, company=company, reason="providers_unavailable_mid_company"
                     )
                     break
                 if self.metrics.candidates_evaluated >= self.limits.max_evals_per_run:
+                    # Stored evidence can still be reused without LLM capacity.
+                    if await self._reuse_stored_evaluation_if_valid(full, qualified_jobs):
+                        remember(
+                            memory,
+                            key,
+                            outcome=OUTCOME_REUSED,
+                            posted_date=full.posted_date,
+                            today=today,
+                        )
+                        continue
                     early_stop = True
                     self._paused_reason = self._paused_reason or "max_evals_reached"
                     await self._preserve_candidates(
-                        to_evaluate[index:],
-                        company=company,
-                        reason="max_evals_reached",
+                        remaining, company=company, reason="max_evals_reached"
                     )
                     break
 
                 try:
-                    await self._evaluate_or_reuse(full, provider, qualified_jobs)
+                    outcome = await self._evaluate_or_reuse(full, provider, qualified_jobs)
+                    if outcome == EVAL_REUSED:
+                        remember(
+                            memory,
+                            key,
+                            outcome=OUTCOME_REUSED,
+                            posted_date=full.posted_date,
+                            today=today,
+                        )
+                    else:
+                        memory.pop(key, None)
                 except AllProvidersUnavailableError as exc:
                     self._quota_exhausted = True
                     self._paused_reason = f"all_providers_unavailable:{exc}"
                     early_stop = True
                     await self._preserve_candidates(
-                        to_evaluate[index:],
-                        company=company,
-                        reason="all_providers_unavailable",
+                        remaining, company=company, reason="all_providers_unavailable"
                     )
                     break
                 except QuotaExhaustedError as exc:
@@ -600,67 +843,47 @@ class AutomaticDiscoveryPipeline:
                     self._paused_reason = f"llm_quota:{exc}"
                     early_stop = True
                     await self._preserve_candidates(
-                        to_evaluate[index:],
-                        company=company,
-                        reason="llm_quota",
+                        remaining, company=company, reason="llm_quota"
                     )
                     break
                 except InvalidModelOutputError:
                     self.metrics.candidates_rejected += 1
+                    remember(
+                        memory,
+                        key,
+                        outcome=OUTCOME_NO_EVIDENCE,
+                        posted_date=full.posted_date,
+                        today=today,
+                    )
                     continue
 
             if company_run_id:
-                capacity_defer = (
-                    early_stop and self._paused_reason == "max_evals_reached"
+                company_metrics["qualified_delta"] = (
+                    len(qualified_jobs) - company_qualified_before
                 )
-                if capacity_defer:
-                    # Intentional run bound — preserve pending evals, release lease
-                    # without failure backoff / consecutive_failures.
+                company_metrics[SELECTION_MEMORY_KEY] = trim_selection_memory(memory, today)
+                if early_stop:
+                    # Capacity / provider pause: candidates are preserved; release
+                    # without failure backoff or consecutive_failures.
+                    company_metrics["deferred_reason"] = self._deferral_reason()
                     await self.store.complete_discovery_company_run(
                         {
                             "run_id": company_run_id,
                             "success": True,
                             "deferred": True,
                             "worker_identity": self.worker_identity,
-                            "metrics": {
-                                "listed": len(candidates),
-                                "qualified_delta": len(qualified_jobs)
-                                - company_qualified_before,
-                                "deferred_reason": "max_evals_reached",
-                            },
+                            "metrics": company_metrics,
                         }
                     )
                     self.metrics.companies_completed += 1
-                elif early_stop:
-                    await self.store.fail_discovery_company_run(
-                        {
-                            "run_id": company_run_id,
-                            "error_category": (
-                                "llm_quota" if self._quota_exhausted else "unknown"
-                            ),
-                            "error_summary": (
-                                self._paused_reason or "company_scan_incomplete"
-                            )[:500],
-                            "worker_identity": self.worker_identity,
-                            "metrics": {
-                                "listed": len(candidates),
-                                "qualified_delta": len(qualified_jobs)
-                                - company_qualified_before,
-                            },
-                        }
-                    )
-                    self.metrics.companies_failed += 1
+                    self.metrics.companies_deferred += 1
                 else:
                     await self.store.complete_discovery_company_run(
                         {
                             "run_id": company_run_id,
                             "success": True,
                             "worker_identity": self.worker_identity,
-                            "metrics": {
-                                "listed": len(candidates),
-                                "qualified_delta": len(qualified_jobs)
-                                - company_qualified_before,
-                            },
+                            "metrics": company_metrics,
                         }
                     )
                     self.metrics.companies_completed += 1
@@ -761,6 +984,20 @@ class AutomaticDiscoveryPipeline:
         }
 
     async def _submit_batches(self, jobs: list[dict[str, Any]]) -> None:
+        unique: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for job in jobs:
+            attachment = job.get("gpt_evaluation")
+            eid = str(attachment.get("evaluation_id") or "") if isinstance(attachment, dict) else ""
+            if eid and (eid in seen or eid in self._already_submitted):
+                self.metrics_extra["already_submitted_skipped"] = (
+                    int(self.metrics_extra.get("already_submitted_skipped", 0)) + 1
+                )
+                continue
+            if eid:
+                seen.add(eid)
+            unique.append(job)
+        jobs = unique
         if not jobs:
             return
         # Fail closed: every job must carry a QUALIFIED gpt_evaluation attachment.
@@ -778,13 +1015,19 @@ class AutomaticDiscoveryPipeline:
         batches = 0
         for i in range(0, len(jobs), self.limits.max_jobs_per_batch):
             if batches >= self.limits.max_batches_per_run:
+                # Evidence stays stored; unsubmitted QUALIFIED jobs are selected
+                # again (without LLM) on the company's next scan.
                 self._paused_reason = self._paused_reason or "max_batches_reached"
+                self.metrics.qualified_unsubmitted += len(jobs) - i
                 break
             chunk = jobs[i : i + self.limits.max_jobs_per_batch]
             client_batch_id = str(
                 uuid.uuid5(
                     _EVAL_ID_NAMESPACE,
-                    f"batch|{self.worker_identity}|{chunk[0]['url']}|{len(chunk)}|{i}",
+                    "batch|"
+                    + "|".join(
+                        sorted(str(j["gpt_evaluation"]["evaluation_id"]) for j in chunk)
+                    ),
                 )
             )
             batch = await self.store.submit_discovery_batch(
@@ -798,4 +1041,5 @@ class AutomaticDiscoveryPipeline:
             if batch_id:
                 self.metrics.submitted_batch_ids.append(batch_id)
             self.metrics.batches_submitted += 1
+            self.metrics.jobs_submitted += len(chunk)
             batches += 1

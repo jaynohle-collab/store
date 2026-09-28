@@ -3,6 +3,9 @@
  * Used only by local PostgreSQL integration tests — never production Neon.
  */
 
+import { readdirSync, readFileSync } from "node:fs";
+import path from "node:path";
+
 import { PGlite } from "@electric-sql/pglite";
 
 type QueryHandle = Promise<Record<string, unknown>[]> & {
@@ -77,6 +80,31 @@ export function createPgliteSql(db: PGlite): PgliteSql {
   };
 
   return sql;
+}
+
+const MIGRATIONS_DIR = path.resolve(__dirname, "../../../../migrations");
+
+/**
+ * Ephemeral PGlite with the real lifecycle + discovery migrations applied
+ * (003 onward; 001/002 are legacy `jobs` table bootstraps). PGlite ships
+ * gen_random_uuid in core, so pgcrypto extension statements are skipped.
+ */
+export async function createPgliteFromMigrations(
+  firstMigration = 3,
+): Promise<PgliteSql> {
+  const db = new PGlite();
+  const files = readdirSync(MIGRATIONS_DIR)
+    .filter((name) => /^\d{3}_.*\.sql$/.test(name))
+    .filter((name) => Number(name.slice(0, 3)) >= firstMigration)
+    .sort();
+  for (const name of files) {
+    const text = readFileSync(path.join(MIGRATIONS_DIR, name), "utf8").replace(
+      /^\s*CREATE EXTENSION[^;]*;/gim,
+      "",
+    );
+    await db.exec(text);
+  }
+  return createPgliteSql(db);
 }
 
 export async function createEphemeralPglite(): Promise<PgliteSql> {

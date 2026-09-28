@@ -111,6 +111,24 @@ export function remoteScopeHardRejectionReason(scope: RemoteScope): string {
   }
 }
 
+export const profileIdSchema = z
+  .string()
+  .regex(/^[a-z0-9][a-z0-9_-]{0,63}$/, "profile_id must be a lowercase slug");
+export const profileVersionSchema = z
+  .string()
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/, "profile_version must be a version slug");
+
+export const profileGenerationFilterSchema = z
+  .object({
+    profile_id: profileIdSchema,
+    profile_version: profileVersionSchema,
+    /** Also match evidence recorded before profile identity existed. */
+    include_legacy_unversioned: z.boolean().default(false),
+  })
+  .strict();
+
+export type ProfileGenerationFilter = z.infer<typeof profileGenerationFilterSchema>;
+
 export const discoveryGptEvaluationRecordSchema = z
   .object({
     client_evaluation_id: z.string().uuid(),
@@ -134,9 +152,18 @@ export const discoveryGptEvaluationRecordSchema = z
     posting_status_verified_at: z.string().datetime().nullable().optional(),
     /** Client evidence only — never used for latest ordering. */
     evaluated_at: z.string().datetime().optional(),
+    /** Persona generation that produced this evidence (absent = legacy rows). */
+    profile_id: profileIdSchema.nullable().optional(),
+    profile_version: profileVersionSchema.nullable().optional(),
   })
   .strict()
   .superRefine((record, ctx) => {
+    if (Boolean(record.profile_id) !== Boolean(record.profile_version)) {
+      ctx.addIssue({
+        code: "custom",
+        message: "profile_id and profile_version must be provided together",
+      });
+    }
     const reason = record.hard_rejection_reason?.trim() || "";
     if (record.gpt_decision === "REJECTED_HARD_RULE") {
       if (!reason) {
@@ -409,8 +436,17 @@ export function gptEvaluationIdempotencyFingerprint(
     direct_posting_url_verified: record.direct_posting_url_verified ?? null,
     normalization_version: record.normalization_version ?? null,
     posting_status: record.posting_status ?? null,
-    posting_status_verified_at: record.posting_status_verified_at ?? null,
+    posting_status_verified_at: canonicalTimestamp(record.posting_status_verified_at),
+    profile_id: record.profile_id ?? null,
+    profile_version: record.profile_version ?? null,
   });
+}
+
+/** Stored timestamptz values round-trip as Date; compare instants, not text. */
+function canonicalTimestamp(value: unknown): string | null {
+  if (value == null || value === "") return null;
+  const date = value instanceof Date ? value : new Date(String(value));
+  return Number.isNaN(date.getTime()) ? String(value) : date.toISOString();
 }
 
 export function normalizeGptEvaluationRecord(
@@ -434,6 +470,8 @@ export function normalizeGptEvaluationRecord(
     normalization_version: record.normalization_version ?? null,
     posting_status: record.posting_status ?? null,
     posting_status_verified_at: record.posting_status_verified_at ?? null,
+    profile_id: record.profile_id ?? null,
+    profile_version: record.profile_version ?? null,
     normalized_url,
   };
 }

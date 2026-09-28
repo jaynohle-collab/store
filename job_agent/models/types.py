@@ -60,6 +60,7 @@ class JobSearchProfile:
     reject: RejectionConfig | None = None
     weights: ScoringWeights | None = None
     high_match_threshold: float | None = None
+    profile_id: str | None = None
 
 
 @dataclass

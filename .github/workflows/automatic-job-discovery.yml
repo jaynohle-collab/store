@@ -10,9 +10,21 @@ on:
   workflow_dispatch:
     inputs:
       max_companies:
-        description: "Max companies to claim this run"
+        description: "Max companies to claim this run (blank = repository variable)"
         required: false
-        default: "10"
+        default: ""
+      top_candidates:
+        description: "Top candidates per company, 1-5 (blank = repository variable)"
+        required: false
+        default: ""
+      max_evals:
+        description: "Max new LLM evaluations this run (blank = repository variable)"
+        required: false
+        default: ""
+      skip_expansion:
+        description: "Set true to skip company expansion / verification"
+        required: false
+        default: "false"
       skip_inbox_handoff:
         description: "Set true to skip process_discovery_inbox after producer"
         required: false
@@ -51,11 +63,15 @@ jobs:
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.6-flash' }}
       AUTO_DISCOVERY_WORKER_IDENTITY: github-actions
-      AUTO_DISCOVERY_MAX_COMPANIES: ${{ github.event.inputs.max_companies || vars.AUTO_DISCOVERY_MAX_COMPANIES || '10' }}
-      AUTO_DISCOVERY_MAX_CANDIDATES_PER_COMPANY: ${{ vars.AUTO_DISCOVERY_MAX_CANDIDATES_PER_COMPANY || '100' }}
-      AUTO_DISCOVERY_MAX_EVALS_PER_RUN: ${{ vars.AUTO_DISCOVERY_MAX_EVALS_PER_RUN || '50' }}
-      AUTO_DISCOVERY_MAX_BATCHES_PER_RUN: ${{ vars.AUTO_DISCOVERY_MAX_BATCHES_PER_RUN || '10' }}
-      AUTO_DISCOVERY_MAX_JOBS_PER_BATCH: ${{ vars.AUTO_DISCOVERY_MAX_JOBS_PER_BATCH || '25' }}
+      # New per-run limit names win; legacy repository variables remain honored.
+      AUTO_DISCOVERY_MAX_COMPANIES_PER_RUN: ${{ github.event.inputs.max_companies || vars.AUTO_DISCOVERY_MAX_COMPANIES_PER_RUN || vars.AUTO_DISCOVERY_MAX_COMPANIES || '5' }}
+      AUTO_DISCOVERY_MAX_LISTINGS_PER_COMPANY: ${{ vars.AUTO_DISCOVERY_MAX_LISTINGS_PER_COMPANY || vars.AUTO_DISCOVERY_MAX_CANDIDATES_PER_COMPANY || '100' }}
+      AUTO_DISCOVERY_TOP_CANDIDATES_PER_COMPANY: ${{ github.event.inputs.top_candidates || vars.AUTO_DISCOVERY_TOP_CANDIDATES_PER_COMPANY || '5' }}
+      AUTO_DISCOVERY_MAX_EVALS_PER_RUN: ${{ github.event.inputs.max_evals || vars.AUTO_DISCOVERY_MAX_EVALS_PER_RUN || '15' }}
+      AUTO_DISCOVERY_MAX_BATCHES_PER_RUN: ${{ vars.AUTO_DISCOVERY_MAX_BATCHES_PER_RUN || '3' }}
+      AUTO_DISCOVERY_MAX_JOBS_PER_BATCH: ${{ vars.AUTO_DISCOVERY_MAX_JOBS_PER_BATCH || '5' }}
+      AUTO_DISCOVERY_MIN_RANK_SCORE: ${{ vars.AUTO_DISCOVERY_MIN_RANK_SCORE || '20' }}
+      AUTO_DISCOVERY_MAX_VERIFICATIONS_PER_RUN: ${{ vars.AUTO_DISCOVERY_MAX_VERIFICATIONS_PER_RUN || '5' }}
       DISCOVERY_INBOX_WORKER_IDENTITY: github-actions
       DISCOVERY_INBOX_BATCH_LIMIT: ${{ vars.DISCOVERY_INBOX_BATCH_LIMIT || '5' }}
       DISCOVERY_INBOX_STALE_PROCESSING_MINUTES: ${{ vars.DISCOVERY_INBOX_STALE_PROCESSING_MINUTES || '60' }}
@@ -98,10 +114,20 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt
 
+      - name: Expand and verify discovery companies
+        # Seed catalog + history-derived official ATS URLs only; bounded verification.
+        # Expansion problems never block the producer or inbox processing.
+        if: ${{ github.event.inputs.skip_expansion != 'true' && vars.AUTO_DISCOVERY_EXPANSION_ENABLED != 'false' }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python -m job_agent.examples.expand_discovery_companies \
+            --max-verifications "${AUTO_DISCOVERY_MAX_VERIFICATIONS_PER_RUN}"
+
       - name: Run automatic discovery producer
         run: |
           set -euo pipefail
-          MAX="${AUTO_DISCOVERY_MAX_COMPANIES}"
+          MAX="${AUTO_DISCOVERY_MAX_COMPANIES_PER_RUN}"
           echo "Claiming up to ${MAX} due discovery company(ies)"
           # Secrets and Neon connection strings are never echoed.
           python -m job_agent.examples.automatic_discovery_run \

@@ -554,8 +554,61 @@ Migration `011_discovery_pending_evaluations.sql` adds a durable pending-evaluat
 
 - Schedule: repository variable `AUTO_DISCOVERY_SCHEDULE_ENABLED=true` (cron `17 4,6,8,10 * * *` UTC ≈ 9:17 PM–3:17 AM PDT, so results are ready by ~4:00 AM Pacific even with GitHub schedule delays); `workflow_dispatch` always runs
 - Inbox schedule remains `DISCOVERY_INBOX_SCHEDULE_ENABLED`
-- Env bounds: `AUTO_DISCOVERY_MAX_COMPANIES`, `AUTO_DISCOVERY_MAX_CANDIDATES_PER_COMPANY`, `AUTO_DISCOVERY_MAX_EVALS_PER_RUN`, `AUTO_DISCOVERY_MAX_BATCHES_PER_RUN`, `AUTO_DISCOVERY_MAX_JOBS_PER_BATCH`
+- Env bounds (separate breadth vs. LLM cost):
+  - `AUTO_DISCOVERY_MAX_COMPANIES_PER_RUN` (default 5; legacy `AUTO_DISCOVERY_MAX_COMPANIES` is the fallback)
+  - `AUTO_DISCOVERY_MAX_LISTINGS_PER_COMPANY` (default 100; legacy `AUTO_DISCOVERY_MAX_CANDIDATES_PER_COMPANY` is the fallback)
+  - `AUTO_DISCOVERY_TOP_CANDIDATES_PER_COMPANY` (default 5, clamped 1–5)
+  - `AUTO_DISCOVERY_MAX_EVALS_PER_RUN` (default 15), `AUTO_DISCOVERY_MAX_BATCHES_PER_RUN` (3), `AUTO_DISCOVERY_MAX_JOBS_PER_BATCH` (5)
+  - `AUTO_DISCOVERY_MIN_RANK_SCORE` (20), `AUTO_DISCOVERY_MAX_VERIFICATIONS_PER_RUN` (5)
 - Workflow: Auth0 secrets + at least one LLM key; never prints secret values; `contents: read`; concurrency group; `timeout-minutes: 60`
+
+#### Profile-aware ranking and top-K selection
+
+The active persona is `data/job_search_profile.json` (`profile_id` + `profile_version`, override with `JOB_SEARCH_PROFILE_PATH`). Per company, Python:
+
+1. Lists broad lightweight ATS listings. The `MAX_LISTINGS_PER_COMPANY` bound keeps the best deterministic title/location matches, not the first N in ATS order.
+2. Applies deterministic rejects before any full fetch or LLM call:
+   - structural: closed or invalid postings;
+   - persona: internship, junior, entry-level, frontend-only, pure DevOps/SRE, NYC onsite-only, and non-US locations.
+3. Runs the MCP preflight, which skips previously applied, known unchanged, and cross-source duplicate postings.
+4. Uses `lookup_discovery_evaluation_states` to see stored GPT evidence for the active profile generation, including rejected evidence and whether a QUALIFIED evaluation was already submitted.
+5. Ranks the rest deterministically, in this order:
+   - QUALIFIED-but-unsubmitted jobs first;
+   - then new or changed listings, by profile score and freshness;
+   - then candidates in cooldown.
+   Unchanged evaluated listings are skipped, and ties are broken by stable candidate keys.
+6. Fetches full descriptions only for the top `TOP_CANDIDATES_PER_COMPANY`, and calls the LLM only when no reusable stored evidence exists.
+
+Rotation and starvation prevention: a per-company selection memory (stored in company run stats and bounded) does two things:
+- It suppresses re-churn when a listing's update date moves but its evidence was reused.
+- It gives a 7-day cooldown to candidates that produced no usable evidence, so they cannot block others.
+
+Capacity pauses do not count as company failures. Hitting `MAX_EVALS_PER_RUN`, provider quota, or all providers being down releases the company as *deferred*, preserves selected candidates in `discovery_pending_evaluations`, and marks the run `partial`.
+
+#### Profile generations
+
+Migration `012_discovery_profile_generations_and_company_candidates.sql` adds nullable `profile_id` / `profile_version` to `discovery_gpt_evaluations` (additive, no backfill).
+- Existing rows with NULL values are the legacy `jay` / `jay-ai-v1` generation. That generation keeps its original `client_evaluation_id` seeds, so existing evidence is reused unchanged.
+- A new `profile_version` appends `|profile:{id}:{version}` to the seed. It starts a new evidence generation without overwriting older rows.
+- Canonical jobs stay global.
+- Preflight and state lookups accept a `profile` filter.
+
+#### Company expansion
+
+`python -m job_agent.examples.expand_discovery_companies` runs as a non-blocking workflow step before the producer. It can be disabled with `AUTO_DISCOVERY_EXPANSION_ENABLED=false`.
+
+Candidates come from two sources only:
+- the curated seed catalog `data/discovery_company_seeds.json`, whose identifiers were confirmed against the public ATS APIs;
+- official Greenhouse, Ashby, Lever, and Workday posting URLs already present in job history or GPT evidence, parsed with strict patterns. ATS identifiers are never guessed.
+
+Candidates live in `discovery_company_candidates`, with unique company keys and unique provider/org pairs. Each run leases at most `MAX_VERIFICATIONS_PER_RUN` of them and verifies each against its official ATS endpoint (SSRF allowlist, bounded response size, redirect re-validation).
+
+Remote MCP then records the outcome:
+- Verified candidates are promoted into `discovery_companies` (enabled, `normal` priority). If the company key or ATS org is already registered, the existing company is linked instead.
+- Transient failures back off exponentially.
+- Not-found or invalid candidates are rejected. Repeated failures are rejected after 5 attempts.
+
+MCP stores state only: it does not crawl or verify.
 
 #### Retention (dry-run only)
 
@@ -563,7 +616,15 @@ MCP tools `get_storage_observability` and `preview_description_retention` report
 
 #### Dashboard
 
-`/dashboard/discovery` shows an automatic discovery status panel (latest runs, due/failed companies, pending/failed batches, next scan). Missing migration tables surface a graceful error message.
+`/dashboard/discovery` shows an automatic discovery status panel with:
+- latest runs, due and failed companies, pending and failed batches, and the next scan;
+- the active profile id and version;
+- full last-run metrics: listings, ranked, selected, reused evidence, new evaluations, estimated tokens, HTTP requests, and duration;
+- registry size by ATS provider;
+- company candidate counts by verification status;
+- GPT evidence counts per profile generation.
+
+Missing migration tables surface a graceful error message.
 
 #### Milestone 5 production rollout
 

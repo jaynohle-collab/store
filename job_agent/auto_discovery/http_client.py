@@ -6,6 +6,7 @@ import logging
 import random
 import time
 from typing import Any
+from urllib.parse import urljoin
 
 import httpx
 
@@ -16,7 +17,12 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT = httpx.Timeout(10.0, read=30.0)
 DEFAULT_MAX_RETRIES = 3
+DEFAULT_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+DEFAULT_MAX_REDIRECTS = 3
 RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+REDIRECT_STATUS = frozenset({301, 302, 303, 307, 308})
+# Headers describing the wire encoding; the buffered body is already decoded.
+_WIRE_HEADERS = frozenset({"content-encoding", "content-length", "transfer-encoding"})
 
 
 def classify_http_error(status_code: int | None, exc: BaseException | None = None) -> str:
@@ -38,7 +44,8 @@ def classify_http_error(status_code: int | None, exc: BaseException | None = Non
 
 
 class SafeHttpClient:
-    """httpx wrapper: SSRF check, timeout, retries with jitter, no secret logging."""
+    """httpx wrapper: SSRF check per hop, timeouts, bounded body size and
+    redirects, retries with jitter, request metrics, no secret logging."""
 
     def __init__(
         self,
@@ -46,16 +53,27 @@ class SafeHttpClient:
         transport: httpx.BaseTransport | None = None,
         timeout: httpx.Timeout | float | None = None,
         max_retries: int = DEFAULT_MAX_RETRIES,
+        max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
+        max_redirects: int = DEFAULT_MAX_REDIRECTS,
         user_agent: str = "jay-job-auto-discovery/1.0",
     ):
         self._timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
         self._max_retries = max(0, max_retries)
+        self._max_response_bytes = max(1024, int(max_response_bytes))
+        self._max_redirects = max(0, int(max_redirects))
         self._client = httpx.Client(
             transport=transport,
             timeout=self._timeout,
             follow_redirects=False,
             headers={"User-Agent": user_agent, "Accept": "application/json"},
         )
+        self.stats: dict[str, int] = {
+            "requests": 0,
+            "bytes_downloaded": 0,
+            "rate_limited": 0,
+            "retries": 0,
+            "redirects": 0,
+        }
 
     def close(self) -> None:
         self._client.close()
@@ -77,19 +95,54 @@ class SafeHttpClient:
         params: dict[str, Any] | None = None,
     ) -> httpx.Response:
         safe_url = assert_safe_ats_url(url, careers_host=careers_host)
+        for hop in range(self._max_redirects + 1):
+            response = self._request_with_retries(
+                method, safe_url, json=json, headers=headers, params=params
+            )
+            if response.status_code not in REDIRECT_STATUS:
+                return response
+            location = response.headers.get("Location")
+            if not location or hop >= self._max_redirects:
+                raise AdapterError(
+                    f"redirect limit reached for {method} {self._safe_log_url(safe_url)}",
+                    category="validation",
+                    status_code=response.status_code,
+                )
+            self.stats["redirects"] += 1
+            # Every hop is re-validated: HTTPS, allowlisted host, no private IPs.
+            safe_url = assert_safe_ats_url(
+                urljoin(safe_url, location), careers_host=careers_host
+            )
+            params = None
+            if response.status_code == 303:
+                method, json = "GET", None
+        raise AdapterError(
+            f"redirect limit reached for {method} {self._safe_log_url(safe_url)}",
+            category="validation",
+        )
+
+    def _request_with_retries(
+        self,
+        method: str,
+        safe_url: str,
+        *,
+        json: Any | None,
+        headers: dict[str, str] | None,
+        params: dict[str, Any] | None,
+    ) -> httpx.Response:
         last_exc: BaseException | None = None
         last_status: int | None = None
 
         for attempt in range(self._max_retries + 1):
+            if attempt:
+                self.stats["retries"] += 1
             try:
-                response = self._client.request(
-                    method,
-                    safe_url,
-                    json=json,
-                    headers=headers,
-                    params=params,
+                response = self._send_bounded(
+                    method, safe_url, json=json, headers=headers, params=params
                 )
                 last_status = response.status_code
+                if response.status_code == 429:
+                    self.stats["rate_limited"] += 1
                 if response.status_code in RETRYABLE_STATUS and attempt < self._max_retries:
                     self._sleep_backoff(attempt, response)
                     continue
@@ -124,6 +177,51 @@ class SafeHttpClient:
             category=classify_http_error(last_status, last_exc),
             status_code=last_status,
         )
+
+    def _send_bounded(
+        self,
+        method: str,
+        safe_url: str,
+        *,
+        json: Any | None,
+        headers: dict[str, str] | None,
+        params: dict[str, Any] | None,
+    ) -> httpx.Response:
+        self.stats["requests"] += 1
+        with self._client.stream(
+            method, safe_url, json=json, headers=headers, params=params
+        ) as response:
+            declared = response.headers.get("Content-Length")
+            if declared and declared.isdigit() and int(declared) > self._max_response_bytes:
+                raise AdapterError(
+                    f"response too large for {method} {self._safe_log_url(safe_url)}",
+                    category="validation",
+                    status_code=response.status_code,
+                )
+            chunks: list[bytes] = []
+            total = 0
+            for chunk in response.iter_bytes():
+                total += len(chunk)
+                if total > self._max_response_bytes:
+                    self.stats["bytes_downloaded"] += total
+                    raise AdapterError(
+                        f"response too large for {method} {self._safe_log_url(safe_url)}",
+                        category="validation",
+                        status_code=response.status_code,
+                    )
+                chunks.append(chunk)
+            self.stats["bytes_downloaded"] += total
+            kept_headers = [
+                (k, v)
+                for k, v in response.headers.multi_items()
+                if k.lower() not in _WIRE_HEADERS
+            ]
+            return httpx.Response(
+                response.status_code,
+                headers=kept_headers,
+                content=b"".join(chunks),
+                request=response.request,
+            )
 
     def get(self, url: str, **kwargs: Any) -> httpx.Response:
         return self.request("GET", url, **kwargs)

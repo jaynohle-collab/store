@@ -5,8 +5,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
-SCORING_VERSION = "profile-v1"
-PROFILE_VERSION = "jay-ai-v1"
+from ..profile.identity import default_profile_version
+from ..ranking.scoring import SCORING_VERSION
+
+PROFILE_VERSION = default_profile_version()
 
 
 class EvaluationStore(Protocol):

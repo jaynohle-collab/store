@@ -524,7 +524,7 @@ Makes discovery operational without opening ChatGPT. Applications stay manual.
 #### Architecture flow
 
 ```
-GitHub Actions automatic-job-discovery (cron */6h + kill switch)
+GitHub Actions automatic-job-discovery (overnight cron + kill switch)
   → claim_due_discovery_companies (MCP lease)
   → official ATS adapters (Greenhouse / Ashby / Lever / Workday / careers)
   → deterministic rejects → check_discovery_candidates
@@ -552,7 +552,7 @@ Migration `011_discovery_pending_evaluations.sql` adds a durable pending-evaluat
 
 #### Kill switches and bounds
 
-- Schedule: repository variable `AUTO_DISCOVERY_SCHEDULE_ENABLED=true` (cron `0 */6 * * *`); `workflow_dispatch` always runs
+- Schedule: repository variable `AUTO_DISCOVERY_SCHEDULE_ENABLED=true` (cron `17 4,6,8,10 * * *` UTC ≈ 9:17 PM–3:17 AM PDT, so results are ready by ~4:00 AM Pacific even with GitHub schedule delays); `workflow_dispatch` always runs
 - Inbox schedule remains `DISCOVERY_INBOX_SCHEDULE_ENABLED`
 - Env bounds: `AUTO_DISCOVERY_MAX_COMPANIES`, `AUTO_DISCOVERY_MAX_CANDIDATES_PER_COMPANY`, `AUTO_DISCOVERY_MAX_EVALS_PER_RUN`, `AUTO_DISCOVERY_MAX_BATCHES_PER_RUN`, `AUTO_DISCOVERY_MAX_JOBS_PER_BATCH`
 - Workflow: Auth0 secrets + at least one LLM key; never prints secret values; `contents: read`; concurrency group; `timeout-minutes: 60`

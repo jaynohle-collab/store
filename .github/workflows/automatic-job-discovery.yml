@@ -18,8 +18,11 @@ on:
         required: false
         default: "false"
   schedule:
-    # Every 6 hours — balances freshness vs free-plan Actions minutes.
-    - cron: "0 */6 * * *"
+    # Overnight burst so results are ready by ~4:00 AM Pacific. GitHub cron is UTC
+    # and scheduled starts are often delayed hours, so runs start well before then:
+    # 04:17/06:17/08:17/10:17 UTC = 9:17 PM/11:17 PM/1:17 AM/3:17 AM PDT (one hour
+    # earlier in PST). Off-the-hour minutes reduce top-of-hour queue delays.
+    - cron: "17 4,6,8,10 * * *"
 
 permissions:
   contents: read

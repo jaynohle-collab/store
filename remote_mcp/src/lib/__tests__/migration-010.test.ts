@@ -89,10 +89,10 @@ describe("010_automatic_discovery_companies.sql contract", () => {
 });
 
 describe("automatic-job-discovery workflow contract", () => {
-  it("schedules every 6h with kill switch, concurrency, and secret checks", () => {
+  it("schedules an overnight burst with kill switch, concurrency, and secret checks", () => {
     expect(workflowYaml).toContain("workflow_dispatch:");
     expect(workflowYaml).toContain("schedule:");
-    expect(workflowYaml).toMatch(/cron:\s*["']0 \*\/6 \* \* \*["']/);
+    expect(workflowYaml).toMatch(/cron:\s*["']17 4,6,8,10 \* \* \*["']/);
     expect(workflowYaml).toContain("AUTO_DISCOVERY_SCHEDULE_ENABLED");
     // Exact equality to 'true' — unset / false / TRUE must not enable schedule.
     expect(workflowYaml).toContain(

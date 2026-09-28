@@ -36,6 +36,12 @@ logger = logging.getLogger(__name__)
 # Namespace for deterministic client_evaluation_id (UUIDv5).
 _EVAL_ID_NAMESPACE = uuid.UUID("6ba7b810-9dad-11d1-80b4-00c04fd430c8")
 _PREFLIGHT_CHUNK = 100
+# Server-side idempotency rejection from record_discovery_evaluations.
+_IDEMPOTENCY_CONFLICT_MARKER = "already exists with a different evaluation payload"
+
+
+class StoredEvaluationMismatchError(RuntimeError):
+    """A stored evaluation exists for the deterministic id but identity differs."""
 
 
 class AutomaticDiscoveryPipeline:
@@ -246,11 +252,7 @@ class AutomaticDiscoveryPipeline:
             )
             pending_id = str(row.get("id") or "")
             try:
-                reused = await self._reuse_stored_evaluation_if_valid(
-                    cand, qualified_jobs
-                )
-                if not reused:
-                    await self._evaluate_and_record(cand, provider, qualified_jobs)
+                await self._evaluate_or_reuse(cand, provider, qualified_jobs)
                 if pending_id and hasattr(
                     self.store, "complete_pending_discovery_evaluation"
                 ):
@@ -330,39 +332,45 @@ class AutomaticDiscoveryPipeline:
         else:
             self.metrics.candidates_rejected += 1
 
-    async def _reuse_stored_evaluation_if_valid(
+    async def _evaluate_or_reuse(
         self,
         cand: LightweightCandidate,
+        provider: EvaluationProvider,
         qualified_jobs: list[dict[str, Any]],
-    ) -> bool:
-        """Reuse a prior persist when pending completion crashed mid-flight.
+    ) -> None:
+        """Single evaluation entry point for pending resumes and fresh scans.
 
-        Returns True when a matching stored evaluation was applied (no LLM call).
-        Raises when a stored row exists for the deterministic id but identity
-        fields do not match (fail closed — do not re-call the LLM).
+        Stored evidence for the deterministic client_evaluation_id is reused
+        before any LLM request; otherwise evaluate, persist, then count.
         """
+        if await self._reuse_stored_evaluation_if_valid(cand, qualified_jobs):
+            return
+        await self._evaluate_and_record(cand, provider, qualified_jobs)
+
+    async def _lookup_stored_evaluation(
+        self, client_id: str
+    ) -> dict[str, Any] | None:
         if not hasattr(self.store, "get_discovery_evaluation_by_client_id"):
-            return False
-        client_id = self._idempotent_client_id(cand)
+            return None
         lookup = await self.store.get_discovery_evaluation_by_client_id(
             {"client_evaluation_id": client_id}
         )
         stored = (lookup or {}).get("evaluation")
-        if not isinstance(stored, dict):
-            return False
-        if not self._stored_evaluation_matches_candidate(stored, cand):
-            raise RuntimeError(
-                "stored evaluation identity mismatch for client_evaluation_id "
-                f"{client_id}; refusing reuse and LLM retry"
-            )
+        return stored if isinstance(stored, dict) else None
+
+    def _apply_stored_evaluation(
+        self,
+        stored: dict[str, Any],
+        cand: LightweightCandidate,
+        qualified_jobs: list[dict[str, Any]],
+    ) -> None:
         evaluation_id = str(
             stored.get("evaluation_id") or stored.get("id") or ""
         ).strip()
-        description = (cand.description or "").strip()
         # Do not increment llm_calls or candidates_evaluated on reuse.
         self._apply_evaluation_outcome(
             cand=cand,
-            description=description,
+            description=(cand.description or "").strip(),
             record=stored,
             evaluation_id=evaluation_id or None,
             qualified_jobs=qualified_jobs,
@@ -370,6 +378,28 @@ class AutomaticDiscoveryPipeline:
         self.metrics_extra["pending_eval_reused"] = (
             int(self.metrics_extra.get("pending_eval_reused") or 0) + 1
         )
+
+    async def _reuse_stored_evaluation_if_valid(
+        self,
+        cand: LightweightCandidate,
+        qualified_jobs: list[dict[str, Any]],
+    ) -> bool:
+        """Reuse stored evidence for the deterministic client_evaluation_id.
+
+        Returns True when a matching stored evaluation was applied (no LLM call).
+        Raises when a stored row exists for the deterministic id but identity
+        fields do not match (fail closed — do not re-call the LLM).
+        """
+        client_id = self._idempotent_client_id(cand)
+        stored = await self._lookup_stored_evaluation(client_id)
+        if stored is None:
+            return False
+        if not self._stored_evaluation_matches_candidate(stored, cand):
+            raise StoredEvaluationMismatchError(
+                "stored evaluation identity mismatch for client_evaluation_id "
+                f"{client_id}; refusing reuse and LLM retry"
+            )
+        self._apply_stored_evaluation(stored, cand, qualified_jobs)
         return True
 
     async def _evaluate_and_record(
@@ -381,13 +411,34 @@ class AutomaticDiscoveryPipeline:
         description = (full.description or "").strip()
         record = evaluate_candidate(provider, full, description)
         # Deterministic id BEFORE record — same fingerprint as pending queue.
-        record["client_evaluation_id"] = self._idempotent_client_id(full)
+        client_id = self._idempotent_client_id(full)
+        record["client_evaluation_id"] = client_id
         # LLM was invoked; count the call even if persistence later conflicts.
         self.metrics.llm_calls += 1
 
-        recorded = await self.store.record_discovery_evaluations(
-            {"evaluations": [record]}
-        )
+        try:
+            recorded = await self.store.record_discovery_evaluations(
+                {"evaluations": [record]}
+            )
+        except Exception as exc:
+            if _IDEMPOTENCY_CONFLICT_MARKER not in str(exc):
+                raise
+            # Lookup-create race: another writer persisted this id first.
+            try:
+                stored = await self._lookup_stored_evaluation(client_id)
+            except Exception:
+                stored = None
+            if stored is None or not self._stored_evaluation_matches_candidate(
+                stored, full
+            ):
+                raise exc
+            logger.info(
+                "record conflict for client_evaluation_id %s resolved by reusing "
+                "matching stored evaluation",
+                client_id,
+            )
+            self._apply_stored_evaluation(stored, full, qualified_jobs)
+            return
         # Only count a successful evaluation after durable persist.
         self.metrics.candidates_evaluated += 1
         evaluation_id = self._extract_evaluation_id(recorded, record)
@@ -533,7 +584,7 @@ class AutomaticDiscoveryPipeline:
                     break
 
                 try:
-                    await self._evaluate_and_record(full, provider, qualified_jobs)
+                    await self._evaluate_or_reuse(full, provider, qualified_jobs)
                 except AllProvidersUnavailableError as exc:
                     self._quota_exhausted = True
                     self._paused_reason = f"all_providers_unavailable:{exc}"

@@ -75,6 +75,8 @@ class FakeStore:
         self._complete_pending_fail_once = False
         self._record_conflict = False
         self._claim_companies = True
+        # Simulate a lookup-create race: first lookup misses a row that exists.
+        self._hide_lookup_once = False
 
     async def start_automatic_discovery_run(self, payload=None):
         self.calls.append(("start_automatic_discovery_run", dict(payload or {})))
@@ -121,6 +123,9 @@ class FakeStore:
     async def get_discovery_evaluation_by_client_id(self, payload):
         self.calls.append(("get_discovery_evaluation_by_client_id", dict(payload)))
         client_id = str(payload.get("client_evaluation_id") or "")
+        if self._hide_lookup_once:
+            self._hide_lookup_once = False
+            return {"ok": True, "found": False, "evaluation": None}
         stored = self._evaluations_by_client_id.get(client_id)
         return {"ok": True, "found": stored is not None, "evaluation": stored}
 
@@ -638,52 +643,252 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             any(n == "complete_pending_discovery_evaluation" for n, _ in store.calls)
         )
 
-    async def test_different_payload_record_conflict_not_counted_evaluated(self):
-        """Genuine different-payload conflict stays rejected; no false evaluated count."""
-        store = FakeStore()
-        store._claim_companies = True
-        cand = self._cand_with_hash(self.open_cand)
-        pipeline = AutomaticDiscoveryPipeline(
-            store,
-            provider=FakeProvider("ok"),  # type: ignore[arg-type]
-            limits=DiscoveryLimits(max_companies=1, max_evals_per_run=5),
-        )
-        client_id = pipeline._idempotent_client_id(cand)
-        store._evaluations_by_client_id[client_id] = {
-            "evaluation_id": "eval-prior",
+    # --- Fresh-scan evaluate-or-reuse -------------------------------------------
+
+    def _seed_stored(
+        self,
+        store: FakeStore,
+        cand: LightweightCandidate,
+        *,
+        decision: str = "REJECTED_LOW_SCORE",
+        evaluation_id: str = "eval-prior",
+        **overrides: Any,
+    ) -> str:
+        client_id = AutomaticDiscoveryPipeline(store)._idempotent_client_id(cand)
+        qualified = decision == "QUALIFIED"
+        stored = {
+            "evaluation_id": evaluation_id,
             "client_evaluation_id": client_id,
+            "client_candidate_id": cand.client_candidate_id,
+            "company": cand.company,
+            "title": cand.title,
             "url": cand.url,
             "normalized_url": normalize_url(cand.url),
             "source": cand.source,
             "external_job_id": cand.external_job_id,
             "description_hash": cand.description_hash,
-            "gpt_relevance_score": 40,
-            "gpt_decision": "REJECTED_LOW_SCORE",
-            "reasoning_summary": "Prior reject",
+            "gpt_relevance_score": 88 if qualified else 0,
+            "gpt_decision": decision,
+            "reasoning_summary": "Prior evaluation",
             "evaluation_version": "gpt-fit-v2",
             "remote_scope": "US_NATIONWIDE",
             "direct_posting_url_verified": True,
+            "normalization_version": "fingerprint-v1",
             "posting_status": "OPEN",
+            "hard_rejection_reason": None,
         }
-        store._record_conflict = True
+        stored.update(overrides)
+        store._evaluations_by_client_id[client_id] = stored
+        return client_id
+
+    async def _run_fresh_scan(
+        self, store: FakeStore, candidates: list[LightweightCandidate]
+    ) -> tuple[Any, FakeProvider]:
         provider = FakeProvider("ok")
-        adapter = FakeAdapter([cand])
         with mock.patch(
             "job_agent.auto_discovery.pipeline.get_adapter",
-            return_value=adapter,
+            return_value=FakeAdapter(candidates),
         ):
             metrics = await AutomaticDiscoveryPipeline(
                 store,
                 provider=provider,  # type: ignore[arg-type]
                 limits=DiscoveryLimits(max_companies=1, max_evals_per_run=5),
             ).run()
+        return metrics, provider
+
+    @staticmethod
+    def _names(store: FakeStore) -> list[str]:
+        return [n for n, _ in store.calls]
+
+    async def test_fresh_scan_reuses_unchanged_rejected_evaluation(self):
+        store = FakeStore()
+        cand = self._cand_with_hash(self.open_cand)
+        client_id = self._seed_stored(store, cand)
+        before = dict(store._evaluations_by_client_id[client_id])
+
+        metrics, provider = await self._run_fresh_scan(store, [cand])
+
+        self.assertEqual(provider.calls, 0)
+        self.assertEqual(metrics.llm_calls, 0)
+        self.assertEqual(metrics.candidates_evaluated, 0)
+        self.assertEqual(metrics.candidates_rejected, 1)
+        self.assertEqual(metrics.companies_failed, 0)
+        self.assertEqual(metrics.companies_completed, 1)
+        self.assertEqual(metrics.errors, [])
+        self.assertNotIn("record_discovery_evaluations", self._names(store))
+        self.assertNotIn("fail_discovery_company_run", self._names(store))
+        self.assertEqual(store._evaluations_by_client_id[client_id], before)
+        lookups = [
+            p for n, p in store.calls if n == "get_discovery_evaluation_by_client_id"
+        ]
+        self.assertEqual(lookups, [{"client_evaluation_id": client_id}])
+
+    async def test_fresh_scan_mixed_reuse_and_new_counts_only_llm_work(self):
+        store = FakeStore()
+        reused = self._cand_with_hash(self.open_cand)
+        self._seed_stored(store, reused)
+        fresh = self._cand_with_hash(
+            LightweightCandidate(
+                client_candidate_id="greenhouse:stripe:1003",
+                company="Stripe",
+                title="Senior Platform Engineer",
+                url="https://boards.greenhouse.io/stripe/jobs/1003",
+                source="greenhouse",
+                external_job_id="1003",
+                location="Remote - United States",
+                description="Build production LLM agents and platforms.",
+            )
+        )
+
+        metrics, provider = await self._run_fresh_scan(store, [reused, fresh])
+
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(metrics.llm_calls, 1)
+        self.assertEqual(metrics.candidates_evaluated, 1)
+        records = [p for n, p in store.calls if n == "record_discovery_evaluations"]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(
+            records[0]["evaluations"][0]["external_job_id"], fresh.external_job_id
+        )
+
+    async def test_fresh_scan_reused_qualified_follows_normal_submission(self):
+        store = FakeStore()
+        cand = self._cand_with_hash(self.open_cand)
+        self._seed_stored(
+            store, cand, decision="QUALIFIED", evaluation_id="eval-qual-fresh"
+        )
+
+        metrics, provider = await self._run_fresh_scan(store, [cand])
+
+        self.assertEqual(provider.calls, 0)
+        self.assertEqual(metrics.candidates_evaluated, 0)
+        self.assertEqual(metrics.candidates_qualified, 1)
+        self.assertEqual(metrics.batches_submitted, 1)
+        self.assertNotIn("record_discovery_evaluations", self._names(store))
+        submit = [p for n, p in store.calls if n == "submit_discovery_batch"][0]
+        attachment = submit["jobs"][0]["gpt_evaluation"]
+        self.assertEqual(attachment["evaluation_id"], "eval-qual-fresh")
+        self.assertEqual(attachment["gpt_decision"], "QUALIFIED")
+        self.assertEqual(attachment["evaluation_version"], "gpt-fit-v2")
+
+    async def test_fresh_scan_identity_mismatch_fails_closed(self):
+        for field, value in (
+            ("description_hash", "ffffffffffffffff"),
+            ("external_job_id", "9999"),
+            ("source", "lever"),
+            ("evaluation_version", "gpt-fit-v1"),
+            ("normalized_url", "https://boards.greenhouse.io/stripe/jobs/other"),
+        ):
+            with self.subTest(field=field):
+                store = FakeStore()
+                cand = self._cand_with_hash(self.open_cand)
+                client_id = self._seed_stored(store, cand, **{field: value})
+                before = dict(store._evaluations_by_client_id[client_id])
+
+                metrics, provider = await self._run_fresh_scan(store, [cand])
+
+                self.assertEqual(provider.calls, 0)
+                self.assertEqual(metrics.llm_calls, 0)
+                self.assertEqual(metrics.candidates_evaluated, 0)
+                self.assertEqual(metrics.companies_failed, 1)
+                self.assertNotIn("record_discovery_evaluations", self._names(store))
+                self.assertIn("fail_discovery_company_run", self._names(store))
+                self.assertEqual(store._evaluations_by_client_id[client_id], before)
+                self.assertEqual(len(metrics.errors), 1)
+                err = metrics.errors[0]
+                self.assertIn("identity mismatch", err)
+                self.assertIn(client_id, err)
+                self.assertNotIn("Prior evaluation", err)
+                self.assertNotIn(cand.description or "", err)
+
+    async def test_record_conflict_race_reuses_matching_stored_evaluation(self):
+        store = FakeStore()
+        cand = self._cand_with_hash(self.open_cand)
+        client_id = self._seed_stored(store, cand)
+        before = dict(store._evaluations_by_client_id[client_id])
+        store._hide_lookup_once = True
+        store._record_conflict = True
+
+        metrics, provider = await self._run_fresh_scan(store, [cand])
+
         self.assertEqual(provider.calls, 1)
         self.assertEqual(metrics.llm_calls, 1)
         self.assertEqual(metrics.candidates_evaluated, 0)
+        self.assertEqual(metrics.candidates_rejected, 1)
+        self.assertEqual(metrics.companies_failed, 0)
+        self.assertEqual(metrics.errors, [])
+        names = self._names(store)
+        self.assertEqual(names.count("record_discovery_evaluations"), 1)
+        self.assertEqual(names.count("get_discovery_evaluation_by_client_id"), 2)
+        self.assertEqual(store._evaluations_by_client_id[client_id], before)
+
+    async def test_record_conflict_race_with_mismatching_evidence_stays_error(self):
+        store = FakeStore()
+        cand = self._cand_with_hash(self.open_cand)
+        client_id = self._seed_stored(
+            store, cand, description_hash="ffffffffffffffff"
+        )
+        before = dict(store._evaluations_by_client_id[client_id])
+        store._hide_lookup_once = True
+        store._record_conflict = True
+
+        metrics, provider = await self._run_fresh_scan(store, [cand])
+
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(metrics.llm_calls, 1)
+        self.assertEqual(metrics.candidates_evaluated, 0)
+        self.assertEqual(metrics.candidates_qualified, 0)
+        self.assertEqual(metrics.batches_submitted, 0)
         self.assertEqual(metrics.companies_failed, 1)
         self.assertTrue(
             any("different evaluation payload" in err for err in metrics.errors)
         )
+        self.assertEqual(store._evaluations_by_client_id[client_id], before)
+
+    async def test_non_conflict_record_error_is_not_masked_by_lookup(self):
+        store = FakeStore()
+        cand = self._cand_with_hash(self.open_cand)
+
+        async def boom(payload):
+            store.calls.append(("record_discovery_evaluations", dict(payload)))
+            raise RuntimeError("Remote MCP call failed: HTTP 500")
+
+        store.record_discovery_evaluations = boom  # type: ignore[method-assign]
+        metrics, provider = await self._run_fresh_scan(store, [cand])
+
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(metrics.candidates_evaluated, 0)
+        self.assertEqual(metrics.companies_failed, 1)
+        self.assertTrue(any("HTTP 500" in err for err in metrics.errors))
+        self.assertEqual(
+            self._names(store).count("get_discovery_evaluation_by_client_id"), 1
+        )
+
+    async def test_pending_record_conflict_race_reuses_and_completes_pending(self):
+        store = FakeStore()
+        store._claim_companies = False
+        cand = self._cand_with_hash(self.open_cand)
+        self._seed_stored(store, cand)
+        store._pending_items = [self._pending_row(cand)]
+        store._hide_lookup_once = True
+        store._record_conflict = True
+        provider = FakeProvider("ok")
+
+        metrics = await AutomaticDiscoveryPipeline(
+            store,
+            provider=provider,  # type: ignore[arg-type]
+            limits=DiscoveryLimits(max_companies=1, max_evals_per_run=5),
+        ).run()
+
+        self.assertEqual(provider.calls, 1)
+        self.assertEqual(metrics.candidates_evaluated, 0)
+        self.assertEqual(metrics.candidates_rejected, 1)
+        self.assertEqual(metrics.errors, [])
+        completes = [
+            p for n, p in store.calls if n == "complete_pending_discovery_evaluation"
+        ]
+        self.assertEqual(len(completes), 1)
+        self.assertEqual(completes[0]["status"], "completed")
 
 
 if __name__ == "__main__":

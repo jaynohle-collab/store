@@ -2,6 +2,7 @@ import {
   getAutomaticDiscoveryStatus,
   listDiscoveryRunsPage,
 } from "@/lib/db/dashboard";
+import { metricValue, selectRunMetrics } from "@/lib/dashboard/run_metrics";
 import { getActiveProfileId, getActiveProfileVersion } from "@/lib/dashboard/time";
 import { formatDate } from "../_components/JobTable";
 
@@ -27,43 +28,6 @@ type AutoStatus = {
   failed_source_count: number;
   next_scheduled_scan: string | null;
 };
-
-function metricValue(metrics: unknown, key: string): string {
-  if (!metrics || typeof metrics !== "object") return "—";
-  const value = (metrics as Record<string, unknown>)[key];
-  if (value == null) return "—";
-  return String(value);
-}
-
-const RUN_METRIC_LABELS: Array<[string, string]> = [
-  ["companies_claimed", "Companies claimed"],
-  ["companies_completed", "Completed"],
-  ["companies_deferred", "Deferred"],
-  ["companies_failed", "Failed"],
-  ["candidates_listed", "Listings fetched"],
-  ["candidates_deterministic_rejected", "Rule rejected"],
-  ["candidates_skipped", "Known / applied / duplicate"],
-  ["candidates_ranked", "Ranked"],
-  ["candidates_unchanged_skipped", "Unchanged"],
-  ["candidates_below_threshold", "Below threshold"],
-  ["candidates_selected", "Selected (top-K)"],
-  ["full_descriptions_requested", "Full JDs fetched"],
-  ["stored_reused", "Evidence reused"],
-  ["candidates_evaluated", "New LLM evaluations"],
-  ["llm_calls", "LLM calls"],
-  ["estimated_llm_tokens", "Est. tokens"],
-  ["candidates_qualified", "Qualified"],
-  ["candidates_rejected", "Rejected"],
-  ["qualified_unsubmitted", "Qualified, unsubmitted"],
-  ["batches_submitted", "Batches submitted"],
-  ["jobs_submitted", "Jobs submitted"],
-  ["pending_preserved", "Pending preserved"],
-  ["listing_requests", "HTTP requests"],
-  ["rate_limit_responses", "Rate limited"],
-  ["http_retries", "HTTP retries"],
-  ["bytes_downloaded", "Bytes downloaded"],
-  ["duration_seconds", "Duration (s)"],
-];
 
 export default async function DiscoveryRunsPage() {
   let runs: Record<string, unknown>[] = [];
@@ -94,9 +58,7 @@ export default async function DiscoveryRunsPage() {
     latestAuto?.metrics && typeof latestAuto.metrics === "object"
       ? (latestAuto.metrics as Record<string, unknown>)
       : null;
-  const shownMetrics = RUN_METRIC_LABELS.filter(
-    ([key]) => runProfile && runProfile[key] != null,
-  );
+  const shownMetrics = selectRunMetrics(runProfile);
 
   return (
     <>
@@ -170,10 +132,10 @@ export default async function DiscoveryRunsPage() {
                   fontSize: "0.9rem",
                 }}
               >
-                {shownMetrics.map(([key, label]) => (
+                {shownMetrics.map(({ key, label, value }) => (
                   <div key={key}>
                     <div className="muted">{label}</div>
-                    <div>{metricValue(runProfile, key)}</div>
+                    <div>{value}</div>
                   </div>
                 ))}
               </div>

@@ -55,18 +55,26 @@ async def run_async(args: argparse.Namespace) -> int:
     )
     metrics = await pipeline.run()
     logger.info(
-        "automatic discovery finished: claimed=%s completed=%s deferred=%s failed=%s "
-        "listed=%s selected=%s evaluated=%s reused=%s qualified=%s batches=%s",
+        "automatic discovery finished: pending_claimed=%s pending_completed=%s "
+        "pending_paused=%s claimed=%s completed=%s deferred=%s failed=%s "
+        "listed=%s selected=%s queued=%s evaluated=%s evaluations_paused=%s "
+        "reused=%s qualified=%s batches=%s provider_circuit_open=%s",
+        metrics.pending_claimed,
+        metrics.pending_completed,
+        metrics.pending_paused,
         metrics.companies_claimed,
         metrics.companies_completed,
         metrics.companies_deferred,
         metrics.companies_failed,
         metrics.candidates_listed,
         metrics.candidates_selected,
+        metrics.candidates_queued,
         metrics.candidates_evaluated,
+        metrics.evaluations_paused,
         metrics.stored_reused,
         metrics.candidates_qualified,
         metrics.batches_submitted,
+        metrics.provider_circuit_open,
     )
 
     if args.skip_inbox_handoff:

@@ -11,6 +11,12 @@ Per claimed company:
 6. Fetch full descriptions only for selected listings, then evaluate or reuse
    stored evidence. New LLM calls are bounded globally by ``max_evals_per_run``;
    selected candidates beyond the budget are preserved in the pending queue.
+
+When every LLM provider is unavailable, a run-level circuit breaker stops
+further LLM calls but not discovery: due companies are still claimed, listed,
+filtered and ranked, and selected candidates are queued (at most
+``top_candidates_per_company`` per company). Such companies complete normally,
+so the scheduler rotates to other companies while the queue waits for capacity.
 """
 
 from __future__ import annotations
@@ -105,6 +111,8 @@ class AutomaticDiscoveryPipeline:
         self.profile = profile or load_active_profile()
         self.identity: ProfileIdentity = identity_of(self.profile)
         self.metrics = RunMetrics()
+        # Run-level provider circuit breaker: once open, no further LLM calls
+        # are made this run; discovery continues and candidates are queued.
         self._quota_exhausted = False
         self._paused_reason: str | None = None
         self._pending_claims: list[CompanyRecord] = []
@@ -114,9 +122,24 @@ class AutomaticDiscoveryPipeline:
         self.metrics_extra: dict[str, Any] = {
             "pending_preserved": 0,
             "pending_resumed": 0,
-            "pending_completed": 0,
             "pending_eval_reused": 0,
         }
+
+    def _open_provider_circuit(self, exc: Exception) -> None:
+        if self._quota_exhausted:
+            return
+        self._quota_exhausted = True
+        self.metrics.provider_circuit_open = True
+        reason = (
+            "all_providers_unavailable"
+            if isinstance(exc, AllProvidersUnavailableError)
+            else "llm_quota"
+        )
+        # Provider outages outrank capacity pauses in the run summary.
+        if self._paused_reason in {None, "max_evals_reached", "max_batches_reached"}:
+            self._paused_reason = reason
+        self.metrics.errors.append(f"{reason}:{exc}"[:500])
+        logger.warning("LLM provider circuit opened for this run: %s", reason)
 
     def _http_client(self) -> SafeHttpClient:
         if self.http is None:
@@ -138,31 +161,33 @@ class AutomaticDiscoveryPipeline:
             # Resume durably preserved candidates before scanning new ATS listings.
             await self._process_pending_evaluations(provider, qualified_jobs)
 
-            if not self._quota_exhausted:
-                claim = await self.store.claim_due_discovery_companies(
-                    {
-                        "limit": self.limits.max_companies,
-                        "lease_minutes": 30,
-                        "worker_identity": self.worker_identity,
-                        "recover_stale": True,
-                    }
-                )
-                claims = list((claim or {}).get("claims") or [])
-                self.metrics.companies_claimed = len(claims)
-                self._pending_claims = [
-                    CompanyRecord.from_claim(dict(raw)) for raw in claims
-                ]
+            # A provider outage never blocks bounded discovery: companies are still
+            # listed, filtered and ranked; selected candidates are queued.
+            claim = await self.store.claim_due_discovery_companies(
+                {
+                    "limit": self.limits.max_companies,
+                    "lease_minutes": 30,
+                    "worker_identity": self.worker_identity,
+                    "recover_stale": True,
+                }
+            )
+            claims = list((claim or {}).get("claims") or [])
+            self.metrics.companies_claimed = len(claims)
+            self._pending_claims = [
+                CompanyRecord.from_claim(dict(raw)) for raw in claims
+            ]
 
-                for company in list(self._pending_claims):
-                    if self._quota_exhausted:
-                        break
-                    if self.metrics.candidates_evaluated >= self.limits.max_evals_per_run:
-                        self._paused_reason = self._paused_reason or "max_evals_reached"
-                        break
-                    await self._scan_company(company, provider, qualified_jobs)
-                    self._pending_claims = [
-                        c for c in self._pending_claims if c.run_id != company.run_id
-                    ]
+            for company in list(self._pending_claims):
+                if (
+                    not self._quota_exhausted
+                    and self.metrics.candidates_evaluated >= self.limits.max_evals_per_run
+                ):
+                    self._paused_reason = self._paused_reason or "max_evals_reached"
+                    break
+                await self._scan_company(company, provider, qualified_jobs)
+                self._pending_claims = [
+                    c for c in self._pending_claims if c.run_id != company.run_id
+                ]
 
             # Always submit QUALIFIED jobs collected so far before pausing.
             await self._submit_batches(qualified_jobs)
@@ -208,6 +233,7 @@ class AutomaticDiscoveryPipeline:
         return {
             **self.metrics.as_dict(),
             **self.metrics_extra,
+            "listings_fetched": self.metrics.candidates_listed,
             "profile_id": self.identity.profile_id,
             "profile_version": self.identity.profile_version,
             "limits": {
@@ -260,14 +286,15 @@ class AutomaticDiscoveryPipeline:
         *,
         company: CompanyRecord | None = None,
         reason: str,
-    ) -> None:
+    ) -> int | None:
+        """Durably queue candidates; returns saved count, or None if unsupported."""
         items = [
             self._pending_item(c, company=company)
             for c in candidates
             if (c.description or "").strip() and c.description_hash
         ]
         if not items:
-            return
+            return 0
         if not hasattr(self.store, "preserve_pending_discovery_evaluations"):
             logger.error(
                 "store cannot preserve pending evaluations; %s candidates at risk (%s)",
@@ -275,13 +302,32 @@ class AutomaticDiscoveryPipeline:
                 reason,
             )
             self.metrics.errors.append(f"preserve_unavailable:{reason}"[:500])
-            return
+            return None
         result = await self.store.preserve_pending_discovery_evaluations(
             {"items": items}
         )
         saved = int((result or {}).get("saved_count") or len(items))
         self.metrics_extra["pending_preserved"] += saved
         logger.info("Preserved %s pending evaluation candidate(s): %s", saved, reason)
+        return saved
+
+    async def _complete_pending(
+        self, pending_id: str, *, status: str = "completed", last_error: str | None = None
+    ) -> None:
+        if not pending_id or not hasattr(
+            self.store, "complete_pending_discovery_evaluation"
+        ):
+            return
+        payload: dict[str, Any] = {
+            "id": pending_id,
+            "status": status,
+            "worker_identity": self.worker_identity,
+        }
+        if last_error:
+            payload["last_error"] = last_error
+        await self.store.complete_pending_discovery_evaluation(payload)
+        if status == "completed":
+            self.metrics.pending_completed += 1
 
     async def _process_pending_evaluations(
         self,
@@ -304,11 +350,12 @@ class AutomaticDiscoveryPipeline:
         )
         items = list((claimed or {}).get("items") or [])
         self.metrics_extra["pending_resumed"] += len(items)
+        self.metrics.pending_claimed += len(items)
         for row in items:
-            if self._quota_exhausted:
-                # Unfinished claimed rows return to the queue when their lease expires.
-                break
-            if self.metrics.candidates_evaluated >= self.limits.max_evals_per_run:
+            if (
+                not self._quota_exhausted
+                and self.metrics.candidates_evaluated >= self.limits.max_evals_per_run
+            ):
                 break
             cand = LightweightCandidate(
                 client_candidate_id=str(row.get("client_candidate_id") or ""),
@@ -324,41 +371,28 @@ class AutomaticDiscoveryPipeline:
             )
             pending_id = str(row.get("id") or "")
             try:
+                if self._quota_exhausted:
+                    # Circuit open: stored evidence can still complete the row;
+                    # otherwise leave it in_progress until its lease expires.
+                    if await self._reuse_stored_evaluation_if_valid(cand, qualified_jobs):
+                        await self._complete_pending(pending_id)
+                    else:
+                        self.metrics.pending_paused += 1
+                        self.metrics.evaluations_paused += 1
+                    continue
                 await self._evaluate_or_reuse(cand, provider, qualified_jobs)
-                if pending_id and hasattr(
-                    self.store, "complete_pending_discovery_evaluation"
-                ):
-                    await self.store.complete_pending_discovery_evaluation(
-                        {
-                            "id": pending_id,
-                            "status": "completed",
-                            "worker_identity": self.worker_identity,
-                        }
-                    )
-                    self.metrics_extra["pending_completed"] += 1
-            except AllProvidersUnavailableError as exc:
-                self._quota_exhausted = True
-                self._paused_reason = f"all_providers_unavailable:{exc}"
-                await self._preserve_candidates([cand], reason="all_providers_down")
-                break
+                await self._complete_pending(pending_id)
             except QuotaExhaustedError as exc:
-                self._quota_exhausted = True
-                self._paused_reason = f"llm_quota:{exc}"
-                await self._preserve_candidates([cand], reason="llm_quota")
-                break
+                # Includes AllProvidersUnavailableError. The claimed row already
+                # holds this candidate; its lease expiry returns it to the queue.
+                self._open_provider_circuit(exc)
+                self.metrics.pending_paused += 1
+                self.metrics.evaluations_paused += 1
             except InvalidModelOutputError:
                 self.metrics.candidates_rejected += 1
-                if pending_id and hasattr(
-                    self.store, "complete_pending_discovery_evaluation"
-                ):
-                    await self.store.complete_pending_discovery_evaluation(
-                        {
-                            "id": pending_id,
-                            "status": "abandoned",
-                            "last_error": "invalid_model_output",
-                            "worker_identity": self.worker_identity,
-                        }
-                    )
+                await self._complete_pending(
+                    pending_id, status="abandoned", last_error="invalid_model_output"
+                )
 
     def _stored_evaluation_matches_candidate(
         self, stored: dict[str, Any], cand: LightweightCandidate
@@ -792,14 +826,24 @@ class AutomaticDiscoveryPipeline:
                     )
                 )
 
+            provider_paused: list[LightweightCandidate] = []
             for index, (full, key) in enumerate(to_evaluate):
                 remaining = [c for c, _ in to_evaluate[index:]]
                 if self._quota_exhausted:
-                    early_stop = True
-                    await self._preserve_candidates(
-                        remaining, company=company, reason="providers_unavailable_mid_company"
-                    )
-                    break
+                    # Circuit open: reuse stored evidence, queue the rest without
+                    # calling the unavailable providers again.
+                    if await self._reuse_stored_evaluation_if_valid(full, qualified_jobs):
+                        remember(
+                            memory,
+                            key,
+                            outcome=OUTCOME_REUSED,
+                            posted_date=full.posted_date,
+                            today=today,
+                        )
+                    else:
+                        provider_paused.append(full)
+                        self.metrics.evaluations_paused += 1
+                    continue
                 if self.metrics.candidates_evaluated >= self.limits.max_evals_per_run:
                     # Stored evidence can still be reused without LLM capacity.
                     if await self._reuse_stored_evaluation_if_valid(full, qualified_jobs):
@@ -813,9 +857,10 @@ class AutomaticDiscoveryPipeline:
                         continue
                     early_stop = True
                     self._paused_reason = self._paused_reason or "max_evals_reached"
-                    await self._preserve_candidates(
+                    queued = await self._preserve_candidates(
                         remaining, company=company, reason="max_evals_reached"
                     )
+                    self.metrics.candidates_queued += queued or 0
                     break
 
                 try:
@@ -830,22 +875,13 @@ class AutomaticDiscoveryPipeline:
                         )
                     else:
                         memory.pop(key, None)
-                except AllProvidersUnavailableError as exc:
-                    self._quota_exhausted = True
-                    self._paused_reason = f"all_providers_unavailable:{exc}"
-                    early_stop = True
-                    await self._preserve_candidates(
-                        remaining, company=company, reason="all_providers_unavailable"
-                    )
-                    break
                 except QuotaExhaustedError as exc:
-                    self._quota_exhausted = True
-                    self._paused_reason = f"llm_quota:{exc}"
-                    early_stop = True
-                    await self._preserve_candidates(
-                        remaining, company=company, reason="llm_quota"
-                    )
-                    break
+                    # Includes AllProvidersUnavailableError. Stored evidence was
+                    # already checked before the LLM call, so queue directly.
+                    self._open_provider_circuit(exc)
+                    provider_paused.append(full)
+                    self.metrics.evaluations_paused += 1
+                    continue
                 except InvalidModelOutputError:
                     self.metrics.candidates_rejected += 1
                     remember(
@@ -856,6 +892,18 @@ class AutomaticDiscoveryPipeline:
                         today=today,
                     )
                     continue
+
+            if provider_paused:
+                queued = await self._preserve_candidates(
+                    provider_paused, company=company, reason="providers_unavailable"
+                )
+                if queued is None:
+                    # Nothing durable holds the work: rescan when providers recover.
+                    early_stop = True
+                else:
+                    self.metrics.candidates_queued += queued
+                    company_metrics["candidates_queued"] = queued
+                    company_metrics["evaluation_paused_reason"] = "llm_unavailable"
 
             if company_run_id:
                 company_metrics["qualified_delta"] = (

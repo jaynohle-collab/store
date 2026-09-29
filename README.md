@@ -583,7 +583,9 @@ Rotation and starvation prevention: a per-company selection memory (stored in co
 - It suppresses re-churn when a listing's update date moves but its evidence was reused.
 - It gives a 7-day cooldown to candidates that produced no usable evidence, so they cannot block others.
 
-Capacity pauses do not count as company failures. Hitting `MAX_EVALS_PER_RUN`, provider quota, or all providers being down releases the company as *deferred*, preserves selected candidates in `discovery_pending_evaluations`, and marks the run `partial`.
+Capacity pauses do not count as company failures. Hitting `MAX_EVALS_PER_RUN` releases the company as *deferred*, preserves selected candidates in `discovery_pending_evaluations`, and marks the run `partial`.
+
+Provider outages use a run-level circuit breaker. The first provider-quota or all-providers-unavailable error stops LLM calls for the rest of the run, but not discovery: due companies are still claimed, listed, filtered and ranked, stored evidence is still reused, and selected candidates (at most `TOP_CANDIDATES_PER_COMPANY` per company) are queued for later evaluation. Those companies complete normally so rotation continues; they are deferred only if candidates could not be queued. The run is `partial` with `paused_reason=all_providers_unavailable` (or `llm_quota` for a single provider), and metrics report `pending_claimed`, `pending_completed`, `pending_paused`, `companies_claimed`, `listings_fetched`, `candidates_queued` and `evaluations_paused` separately.
 
 #### Profile generations
 

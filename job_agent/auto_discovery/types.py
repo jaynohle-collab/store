@@ -97,6 +97,17 @@ class RunMetrics:
     llm_calls: int = 0
     estimated_llm_tokens: int = 0
     pending_preserved: int = 0
+    # Pending-queue processing (resumed rows from earlier runs).
+    pending_claimed: int = 0
+    pending_completed: int = 0
+    # Claimed pending rows left for lease expiry because providers were down.
+    pending_paused: int = 0
+    # Selected scan candidates durably queued for later evaluation.
+    candidates_queued: int = 0
+    # Candidates (pending or fresh) whose LLM evaluation was skipped by the
+    # run-level provider circuit breaker.
+    evaluations_paused: int = 0
+    provider_circuit_open: bool = False
     listing_requests: int = 0
     rate_limit_responses: int = 0
     http_retries: int = 0

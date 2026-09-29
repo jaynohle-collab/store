@@ -11,6 +11,7 @@ from job_agent.auto_discovery.evaluate.providers import (
     AllProvidersUnavailableError,
     EvaluationProvider,
     QuotaExhaustedError,
+    TransientProviderError,
 )
 from job_agent.auto_discovery.types import LightweightCandidate
 from job_agent.memory.fingerprint import compute_description_hash
@@ -250,6 +251,12 @@ def evaluate_candidate(
         )
     except (QuotaExhaustedError, AllProvidersUnavailableError):
         raise
+    except TransientProviderError as exc:
+        # A lone (unwrapped) provider failing transiently leaves no provider
+        # available; this is an outage, not a model-output problem.
+        raise AllProvidersUnavailableError(
+            f"all LLM providers unavailable: {getattr(provider, 'name', 'provider')}:{exc}"
+        ) from exc
     except Exception as exc:
         raise InvalidModelOutputError(f"provider call failed: {type(exc).__name__}") from exc
 

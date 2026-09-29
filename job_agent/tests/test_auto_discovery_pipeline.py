@@ -265,7 +265,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             any(name == "submit_discovery_batch" for name, _ in store.calls)
         )
 
-    async def test_quota_exhaustion_pauses_and_defers_company_run(self):
+    async def test_quota_exhaustion_pauses_and_queues_without_company_failure(self):
         store = FakeStore()
         provider = FakeProvider("quota")
         pipeline = AutomaticDiscoveryPipeline(
@@ -282,18 +282,23 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provider.calls, 1)
         self.assertEqual(metrics.batches_submitted, 0)
         self.assertEqual(metrics.companies_failed, 0)
-        self.assertEqual(metrics.companies_deferred, 1)
+        self.assertEqual(metrics.companies_deferred, 0)
+        self.assertEqual(metrics.candidates_queued, 1)
         finish = [p for n, p in store.calls if n == "finish_automatic_discovery_run"][0]
         self.assertEqual(finish["status"], "partial")
         self.assertTrue(finish["metrics"]["quota_exhausted"])
-        # Provider quota is not a company failure: no backoff, candidate preserved.
+        self.assertEqual(finish["metrics"]["paused_reason"], "llm_quota")
+        # Provider quota is not a company failure: no backoff, candidate queued,
+        # and the scanned company completes so rotation moves on.
         self.assertFalse(
             any(name == "fail_discovery_company_run" for name, _ in store.calls)
         )
         completes = [p for n, p in store.calls if n == "complete_discovery_company_run"]
         self.assertEqual(len(completes), 1)
-        self.assertTrue(completes[0]["deferred"])
-        self.assertEqual(completes[0]["metrics"]["deferred_reason"], "llm_unavailable")
+        self.assertFalse(completes[0].get("deferred", False))
+        self.assertEqual(
+            completes[0]["metrics"]["evaluation_paused_reason"], "llm_unavailable"
+        )
         self.assertIn(
             "preserve_pending_discovery_evaluations", [n for n, _ in store.calls]
         )

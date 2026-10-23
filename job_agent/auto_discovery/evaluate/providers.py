@@ -402,6 +402,44 @@ class GroqProvider(EvaluationProvider):
         self.api_key = api_key
         self.model = model
         self._transport = transport
+        self._model_rediscovered = False
+
+    def _headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+    def _rediscover_model(self) -> str | None:
+        """Pick a current chat model from Groq's live model list (once per provider).
+
+        Groq retires model ids regularly; a stale default 404s every call and
+        silently stops discovery. Only ids returned by the official /models API are used.
+        """
+        if self._model_rediscovered:
+            return None
+        self._model_rediscovered = True
+        try:
+            with httpx.Client(transport=self._transport, timeout=30.0) as client:
+                response = client.get("https://api.groq.com/openai/v1/models", headers=self._headers())
+            if response.status_code >= 400:
+                return None
+            ids = [
+                str(m.get("id"))
+                for m in (response.json().get("data") or [])
+                if isinstance(m, dict) and m.get("id") and m.get("active", True) is not False
+            ]
+        except (httpx.HTTPError, ValueError, AttributeError):
+            return None
+        chosen = pick_groq_chat_model(ids, exclude=self.model)
+        if chosen:
+            logger.warning(
+                "groq model %s unavailable; switching to %s (set GROQ_MODEL to pin)",
+                self.model,
+                chosen,
+            )
+            self.model = chosen
+        return chosen
 
     def complete_json(
         self,
@@ -410,30 +448,32 @@ class GroqProvider(EvaluationProvider):
         user: str,
         schema: dict[str, Any],
     ) -> dict[str, Any]:
-        payload = {
-            "model": self.model,
-            "temperature": 0,
-            "response_format": {"type": "json_object"},
-            "messages": [
-                {"role": "system", "content": system},
-                {
-                    "role": "user",
-                    "content": user + "\n\nJSON schema:\n" + json.dumps(schema),
-                },
-            ],
-        }
-        try:
-            with httpx.Client(transport=self._transport, timeout=60.0) as client:
-                response = client.post(
-                    "https://api.groq.com/openai/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json",
+        def _post() -> httpx.Response:
+            payload = {
+                "model": self.model,
+                "temperature": 0,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {"role": "system", "content": system},
+                    {
+                        "role": "user",
+                        "content": user + "\n\nJSON schema:\n" + json.dumps(schema),
                     },
-                    json=payload,
-                )
-        except (httpx.TimeoutException, httpx.NetworkError, httpx.TransportError) as exc:
-            raise TransientProviderError(f"groq transport: {type(exc).__name__}") from None
+                ],
+            }
+            try:
+                with httpx.Client(transport=self._transport, timeout=60.0) as client:
+                    return client.post(
+                        "https://api.groq.com/openai/v1/chat/completions",
+                        headers=self._headers(),
+                        json=payload,
+                    )
+            except (httpx.TimeoutException, httpx.NetworkError, httpx.TransportError) as exc:
+                raise TransientProviderError(f"groq transport: {type(exc).__name__}") from None
+
+        response = _post()
+        if response.status_code == 404 and self._rediscover_model():
+            response = _post()
         _raise_for_provider_http("groq", response.status_code, response.text)
         data = response.json()
         try:
@@ -568,3 +608,39 @@ def resolve_provider(
     if len(providers) == 1:
         return providers[0]
     return FallbackEvaluationProvider(providers)
+
+
+# Preference order for automatic Groq model selection (first match wins).
+_GROQ_MODEL_PREFERENCE = (
+    "llama-3.3-70b-versatile",
+    "openai/gpt-oss-120b",
+    "meta-llama/llama-4-maverick-17b-128e-instruct",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+    "qwen/qwen3-32b",
+    "openai/gpt-oss-20b",
+    "llama-3.1-8b-instant",
+)
+_GROQ_NON_CHAT = re.compile(
+    r"whisper|tts|guard|embed|playai|orpheus|distil|safeguard|compound", re.I
+)
+_GROQ_SIZE = re.compile(r"(\d+)b\b", re.I)
+
+
+def _groq_size(model_id: str) -> tuple[int, str]:
+    sizes = _GROQ_SIZE.findall(model_id)
+    return (int(sizes[-1]) if sizes else 0, model_id)
+
+
+def pick_groq_chat_model(ids: list[str], *, exclude: str | None = None) -> str | None:
+    """Choose a chat-capable model id from Groq's /models list."""
+    candidates = [i for i in ids if i and i != exclude and not _GROQ_NON_CHAT.search(i)]
+    if not candidates:
+        return None
+    for preferred in _GROQ_MODEL_PREFERENCE:
+        if preferred in candidates:
+            return preferred
+    for family in ("gpt-oss", "llama-4", "llama", "qwen", "kimi", "deepseek"):
+        family_ids = [c for c in candidates if family in c.lower()]
+        if family_ids:
+            return max(family_ids, key=_groq_size)
+    return max(candidates, key=_groq_size)

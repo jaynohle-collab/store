@@ -34,7 +34,9 @@ on:
     # and scheduled starts are often delayed hours, so runs start well before then:
     # 04:17/06:17/08:17/10:17 UTC = 9:17 PM/11:17 PM/1:17 AM/3:17 AM PDT (one hour
     # earlier in PST). Off-the-hour minutes reduce top-of-hour queue delays.
-    - cron: "17 4,6,8,10 * * *"
+    # 16:17/20:17 UTC (9:17 AM/1:17 PM PDT) add daytime runs so fresh postings and
+    # the pending-evaluation queue are picked up the same day.
+    - cron: "17 4,6,8,10,16,20 * * *"
 
 permissions:
   contents: read

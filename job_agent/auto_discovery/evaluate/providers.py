@@ -403,6 +403,8 @@ class GroqProvider(EvaluationProvider):
         self.model = model
         self._transport = transport
         self._model_rediscovered = False
+        self._sleep = time.sleep
+        self.max_rate_limit_waits = GROQ_MAX_RATE_LIMIT_WAITS
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -473,6 +475,20 @@ class GroqProvider(EvaluationProvider):
 
         response = _post()
         if response.status_code == 404 and self._rediscover_model():
+            response = _post()
+        waits = 0
+        while response.status_code == 429 and waits < self.max_rate_limit_waits:
+            delay = groq_per_minute_wait(response)
+            if delay is None:
+                break  # daily / unknown quota: let the fallback chain decide
+            waits += 1
+            logger.info(
+                "groq per-minute rate limit; waiting %.1fs (%d/%d)",
+                delay,
+                waits,
+                self.max_rate_limit_waits,
+            )
+            self._sleep(delay)
             response = _post()
         _raise_for_provider_http("groq", response.status_code, response.text)
         data = response.json()
@@ -644,3 +660,30 @@ def pick_groq_chat_model(ids: list[str], *, exclude: str | None = None) -> str |
         if family_ids:
             return max(family_ids, key=_groq_size)
     return max(candidates, key=_groq_size)
+
+
+# Free-tier Groq limits are per minute (TPM/RPM); a short wait clears them, so
+# they must not open the run-wide provider circuit. Daily limits are not waited on.
+GROQ_MAX_RATE_LIMIT_WAITS = 6
+GROQ_MAX_WAIT_SECONDS = 65.0
+_GROQ_TRY_AGAIN = re.compile(r"try again in\s+(?:(\d+)m)?\s*([\d.]+)?(ms|s)?", re.I)
+
+
+def groq_per_minute_wait(response: httpx.Response) -> float | None:
+    """Seconds to wait for a per-minute Groq 429, or None if not per-minute."""
+    body = (response.text or "").lower()
+    if "per day" in body or "(tpd)" in body or "(rpd)" in body:
+        return None
+    if "per minute" not in body and "(tpm)" not in body and "(rpm)" not in body:
+        return None
+    delay = parse_retry_after(response.headers.get("retry-after"))
+    if delay is None:
+        match = _GROQ_TRY_AGAIN.search(response.text or "")
+        if match and (match.group(1) or match.group(2)):
+            minutes = float(match.group(1) or 0)
+            value = float(match.group(2) or 0)
+            value = value / 1000.0 if (match.group(3) or "").lower() == "ms" else value
+            delay = minutes * 60 + value
+    if delay is None:
+        delay = 20.0
+    return min(max(delay, 1.0) + 0.5, GROQ_MAX_WAIT_SECONDS)

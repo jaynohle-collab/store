@@ -12,6 +12,7 @@ import logging
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 
@@ -77,6 +78,8 @@ async def run_async(args: argparse.Namespace) -> int:
         metrics.provider_circuit_open,
     )
 
+    outage_code = provider_outage_exit_code(metrics)
+
     if args.skip_inbox_handoff:
         should_process = False
     elif args.process_inbox:
@@ -97,11 +100,35 @@ async def run_async(args: argparse.Namespace) -> int:
                 "--fail-on-batch-failure",
             ]
         )
-        return int(code or 0)
+        return int(code or 0) or outage_code
 
+    if outage_code:
+        return outage_code
     if metrics.errors and metrics.companies_completed == 0 and metrics.batches_submitted == 0:
         return 1
     return 0
+
+
+def provider_outage_exit_code(metrics: Any) -> int:
+    """Fail loudly when the LLM circuit opened and nothing could be evaluated.
+
+    Candidates are queued for the next run either way; this only makes the outage
+    visible (a silent green run hid a denied Gemini project for days).
+    """
+    if not getattr(metrics, "provider_circuit_open", False):
+        return 0
+    reason = next(
+        (e.split(":", 1)[0] for e in getattr(metrics, "errors", []) if e.startswith(("all_providers_unavailable", "llm_quota"))),
+        "llm_unavailable",
+    )
+    paused = int(getattr(metrics, "evaluations_paused", 0) or 0)
+    evaluated = int(getattr(metrics, "candidates_evaluated", 0) or 0)
+    level = "error" if evaluated == 0 and paused > 0 else "warning"
+    print(
+        f"::{level} title=LLM providers unavailable::{reason}: evaluated={evaluated} "
+        f"paused={paused} (candidates queued for the next run; check provider keys)"
+    )
+    return 1 if level == "error" else 0
 
 
 def main(argv: list[str] | None = None) -> int:

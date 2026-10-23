@@ -62,6 +62,9 @@ jobs:
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.6-flash' }}
+      GROQ_MODEL: ${{ vars.GROQ_MODEL || '' }}
+      # Free tiers only unless this repository variable is set to true (OpenAI is paid).
+      AUTO_DISCOVERY_ALLOW_PAID_PROVIDERS: ${{ vars.AUTO_DISCOVERY_ALLOW_PAID_PROVIDERS || 'false' }}
       AUTO_DISCOVERY_WORKER_IDENTITY: github-actions
       # New per-run limit names win; legacy repository variables remain honored.
       AUTO_DISCOVERY_MAX_COMPANIES_PER_RUN: ${{ github.event.inputs.max_companies || vars.AUTO_DISCOVERY_MAX_COMPANIES_PER_RUN || vars.AUTO_DISCOVERY_MAX_COMPANIES || '5' }}
@@ -135,7 +138,8 @@ jobs:
             --skip-inbox-handoff
 
       - name: Process pending discovery inbox batches
-        if: ${{ github.event.inputs.skip_inbox_handoff != 'true' }}
+        # Still drain the inbox when the producer failed on an LLM outage.
+        if: ${{ !cancelled() && github.event.inputs.skip_inbox_handoff != 'true' }}
         run: |
           set -euo pipefail
           LIMIT="${DISCOVERY_INBOX_BATCH_LIMIT}"

@@ -79,6 +79,7 @@ class ProviderFallbackTests(unittest.TestCase):
                 "GROQ_API_KEY": "q-key",
                 "OPENAI_API_KEY": "o-key",
                 "AUTO_DISCOVERY_LLM_PROVIDER": "",
+                "AUTO_DISCOVERY_ALLOW_PAID_PROVIDERS": "true",
             },
             clear=False,
         ):
@@ -114,9 +115,11 @@ class ProviderFallbackTests(unittest.TestCase):
                 "GEMINI_API_KEY": "g",
                 "GROQ_API_KEY": "q",
                 "OPENAI_API_KEY": "o",
+                "AUTO_DISCOVERY_ALLOW_PAID_PROVIDERS": "true",
             },
             clear=False,
         ):
+            os.environ.pop("AUTO_DISCOVERY_LLM_PROVIDER", None)
             names = [p.name for p in configured_providers()]
             self.assertEqual(names, ["gemini", "groq", "openai"])
 

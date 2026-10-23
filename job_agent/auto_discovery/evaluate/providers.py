@@ -81,6 +81,14 @@ class TransientProviderError(Exception):
         self.provider_status = provider_status
 
 
+class ProviderAuthError(TransientProviderError):
+    """Provider rejected the credentials or project (HTTP 401/403, non-quota).
+
+    Not retried against the same provider, but the fallback chain moves on and a
+    run with no usable provider pauses (candidates are queued, never dropped).
+    """
+
+
 class QuotaExhaustedError(TransientProviderError):
     """Free-tier / billing quota exhausted for this provider."""
 
@@ -134,6 +142,11 @@ def _raise_for_provider_http(provider: str, status: int, body: str) -> None:
     if status == 404:
         # Model id unavailable / renamed — try next provider when configured.
         raise TransientProviderError(detail, **kwargs)
+    if status in (401, 403):
+        # Revoked key / denied project: an outage for this provider, not a
+        # verdict on the job. Treating it as invalid output silently dropped
+        # every candidate when the Gemini project was denied.
+        raise ProviderAuthError(detail, **kwargs)
     raise AdapterError(detail, category="validation", status_code=status)
 
 
@@ -360,7 +373,8 @@ class GeminiProvider(EvaluationProvider):
                     record["duration_ms"],
                 )
                 if not retryable or attempt >= self.max_attempts:
-                    raise TransientProviderError(
+                    # Keep the subclass (e.g. ProviderAuthError) for callers.
+                    raise type(exc)(
                         f"{exc} (attempts={attempt})",
                         status_code=exc.status_code,
                         provider_status=exc.provider_status,
@@ -485,8 +499,18 @@ def configured_providers(
     *,
     transport: httpx.BaseTransport | None = None,
 ) -> list[EvaluationProvider]:
-    """Return configured providers in default preference order (gemini → groq → openai)."""
+    """Return configured providers in default preference order (gemini → groq → openai).
+
+    Free tiers only by default. OpenAI is paid, so it joins the chain only when
+    ``AUTO_DISCOVERY_ALLOW_PAID_PROVIDERS`` is truthy or it is the explicit
+    ``AUTO_DISCOVERY_LLM_PROVIDER`` override.
+    """
     override = (os.environ.get("AUTO_DISCOVERY_LLM_PROVIDER") or "").strip().lower()
+    allow_paid = (os.environ.get("AUTO_DISCOVERY_ALLOW_PAID_PROVIDERS") or "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
     gemini_key = (os.environ.get("GEMINI_API_KEY") or "").strip()
     groq_key = (os.environ.get("GROQ_API_KEY") or "").strip()
     openai_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
@@ -495,7 +519,18 @@ def configured_providers(
     if gemini_key:
         available["gemini"] = GeminiProvider(gemini_key, transport=transport)
     if groq_key:
-        available["groq"] = GroqProvider(groq_key, transport=transport)
+        groq_model = (os.environ.get("GROQ_MODEL") or "").strip()
+        available["groq"] = (
+            GroqProvider(groq_key, model=groq_model, transport=transport)
+            if groq_model
+            else GroqProvider(groq_key, transport=transport)
+        )
+    if openai_key and not (allow_paid or override == "openai"):
+        logger.info(
+            "OPENAI_API_KEY present but paid providers are disabled "
+            "(set AUTO_DISCOVERY_ALLOW_PAID_PROVIDERS=true to enable)"
+        )
+        openai_key = ""
     if openai_key:
         available["openai"] = OpenAIProvider(
             openai_key,
@@ -526,7 +561,8 @@ def resolve_provider(
     providers = configured_providers(transport=transport)
     if not providers:
         raise AdapterError(
-            "no LLM API key configured (GEMINI_API_KEY / GROQ_API_KEY / OPENAI_API_KEY)",
+            "no LLM API key configured (GEMINI_API_KEY / GROQ_API_KEY; OPENAI_API_KEY "
+            "needs AUTO_DISCOVERY_ALLOW_PAID_PROVIDERS=true)",
             category="validation",
         )
     if len(providers) == 1:

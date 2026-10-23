@@ -20,6 +20,7 @@ from job_agent.auto_discovery.evaluate.providers import (
     EvaluationProvider,
     FallbackEvaluationProvider,
     GeminiProvider,
+    ProviderAuthError,
     QuotaExhaustedError,
     TransientProviderError,
     parse_provider_error,
@@ -182,11 +183,23 @@ class GeminiRetryTests(unittest.TestCase):
         self.assertIsNone(parse_retry_after("soon"))
         self.assertIsNone(parse_retry_after(None))
 
-    def test_validation_and_auth_errors_are_not_retried(self) -> None:
+    def test_auth_errors_are_not_retried_but_allow_fallback(self) -> None:
         for status, google_status in (
-            (400, "INVALID_ARGUMENT"),
             (401, "UNAUTHENTICATED"),
             (403, "PERMISSION_DENIED"),
+        ):
+            with self.subTest(status=status):
+                rec = _Recorder([_google_error(status, google_status, "denied")])
+                sleeps: list[float] = []
+                with self.assertRaises(ProviderAuthError) as ctx:
+                    _call(_gemini(rec, sleeps))
+                self.assertEqual(len(rec.requests), 1)
+                self.assertEqual(sleeps, [])
+                self.assertIn(google_status, str(ctx.exception))
+
+    def test_validation_errors_are_not_retried(self) -> None:
+        for status, google_status in (
+            (400, "INVALID_ARGUMENT"),
         ):
             with self.subTest(status=status):
                 rec = _Recorder([_google_error(status, google_status, "bad request")])

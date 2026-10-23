@@ -12,6 +12,7 @@ from unittest import mock
 from job_agent.auto_discovery.evaluate.providers import (
     AllProvidersUnavailableError,
     FallbackEvaluationProvider,
+    ProviderAuthError,
     QuotaExhaustedError,
     TransientProviderError,
 )
@@ -232,6 +233,46 @@ class ProviderOutageControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("complete_pending_discovery_evaluation", self._names(store))
         self.assertEqual(finish["status"], "partial")
         self.assertEqual(finish["metrics"]["paused_reason"], "all_providers_unavailable")
+
+    async def test_denied_project_403_queues_candidates_instead_of_rejecting(self):
+        # Regression: a denied Gemini project (HTTP 403 PERMISSION_DENIED) was
+        # treated as invalid model output, so every selected job was dropped.
+        gemini = SeqProvider(
+            "gemini",
+            [ProviderAuthError("gemini HTTP 403 PERMISSION_DENIED: project denied")] * 20,
+        )
+        store = OutageStore()
+
+        metrics, finish = await self._run(store, CountingAdapter(listings(10)), gemini)
+
+        self.assertEqual(gemini.calls, 1)
+        self.assertTrue(metrics.provider_circuit_open)
+        self.assertEqual(metrics.candidates_rejected, 0)
+        self.assertEqual(metrics.candidates_queued, 3)
+        self.assertEqual(finish["status"], "partial")
+        self.assertEqual(finish["metrics"]["paused_reason"], "all_providers_unavailable")
+
+    async def test_denied_primary_falls_back_to_next_free_provider(self):
+        ok = {
+            "gpt_relevance_score": 85,
+            "gpt_decision": "QUALIFIED",
+            "reasoning_summary": "Strong AI platform match",
+            "remote_scope": "US_NATIONWIDE",
+            "direct_posting_url_verified": True,
+            "posting_status": "OPEN",
+            "hard_rejection_reason": None,
+        }
+        gemini = SeqProvider("gemini", [ProviderAuthError("gemini HTTP 403")] * 20)
+        groq = SeqProvider("groq", [], success=ok)
+        chain = FallbackEvaluationProvider([gemini, groq])  # type: ignore[list-item]
+        store = OutageStore()
+
+        metrics, _ = await self._run(store, CountingAdapter(listings(10)), chain)
+
+        self.assertFalse(metrics.provider_circuit_open)
+        self.assertEqual(metrics.candidates_rejected, 0)
+        self.assertGreater(metrics.candidates_evaluated, 0)
+        self.assertEqual(groq.calls, metrics.candidates_evaluated)
 
     async def test_queue_growth_is_bounded_by_top_k_and_company_limit(self):
         store = OutageStore(companies=["acme", "globex", "initech"])

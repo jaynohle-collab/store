@@ -137,8 +137,9 @@ export function parseAppliedSort(raw: string | null | undefined): AppliedSort {
 }
 
 export function parseRemoteFilter(raw: string | null | undefined): RemoteFilter {
-  if (raw === "all") return "all";
-  return "remote_us";
+  // Default shows US remote and hybrid jobs; "remote_us" narrows to nationwide remote.
+  if (raw === "remote_us") return "remote_us";
+  return "all";
 }
 
 export type ToApplyListFilters = {

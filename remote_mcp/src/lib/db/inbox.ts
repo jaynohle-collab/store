@@ -5,6 +5,7 @@ import { getDiscoveryGptEvaluationById } from "./discovery_gpt_evaluations";
 import {
   DEFAULT_GPT_EVALUATION_VERSION,
   GPT_QUALIFIED_THRESHOLD,
+  isQualifyingRemoteScope,
   discoveryQualityGatesRequireStoredEvidence,
   getRequiredDiscoveryEvaluationVersion,
   gptAdmissionAttachmentSchema,
@@ -302,9 +303,9 @@ export async function assertDiscoveryJobsGptAdmissionGate(
     }
 
     if (enforceV2 || requireRemoteUs) {
-      if (storedRemote !== "US_NATIONWIDE") {
+      if (!isQualifyingRemoteScope(storedRemote)) {
         throw new DiscoveryGptAdmissionGateError(
-          `Job at index ${index} requires remote_scope=US_NATIONWIDE (got ${storedRemote ?? "null"})`,
+          `Job at index ${index} requires a US remote/restricted/hybrid remote_scope (got ${storedRemote ?? "null"})`,
         );
       }
     }

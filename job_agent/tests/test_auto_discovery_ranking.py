@@ -10,6 +10,7 @@ import os
 import unittest
 import uuid
 from datetime import date
+from pathlib import Path
 from typing import Any
 from unittest import mock
 
@@ -19,6 +20,7 @@ from job_agent.auto_discovery.http_client import SafeHttpClient
 from job_agent.auto_discovery.limits import DiscoveryLimits
 from job_agent.auto_discovery.pipeline import AutomaticDiscoveryPipeline
 from job_agent.auto_discovery.ranking import (
+    profile_score,
     NOVELTY_CHANGED,
     NOVELTY_COOLDOWN,
     NOVELTY_NEW,
@@ -42,10 +44,16 @@ from job_agent.profile.identity import (
     ProfileIdentity,
     load_active_profile,
 )
+from job_agent.profile import load_job_search_profile
 from job_agent.tests.test_auto_discovery_pipeline import FakeAdapter, FakeProvider, FakeStore
 
 TODAY = date(2026, 9, 28)
-PROFILE = load_active_profile()
+# Ranking mechanics use the original AI-focused persona fixture; the active
+# profile in data/ is covered by ActiveProfilePolicyTests.
+PROFILE = load_job_search_profile(
+    Path(__file__).resolve().parent / "fixtures" / "ai_focused_profile.json"
+)
+ACTIVE_PROFILE = load_active_profile()
 
 
 def cand(
@@ -80,6 +88,21 @@ def state(decision: str = "REJECTED_LOW_SCORE", **overrides: Any) -> StoredEvalu
     }
     values.update(overrides)
     return StoredEvaluationState(**values)
+
+
+class ActiveProfilePolicyTests(unittest.TestCase):
+    def test_broadened_roles_are_not_deterministically_rejected(self):
+        for title in ("Senior Frontend Engineer", "Site Reliability Engineer", "Senior DevOps Engineer",
+                      "Senior Software Engineer", "Senior Data Engineer"):
+            with self.subTest(title=title):
+                self.assertIsNone(persona_reject_reason(cand(1, title=title), ACTIVE_PROFILE))
+
+    def test_junior_and_intern_still_rejected(self):
+        self.assertEqual(persona_reject_reason(cand(1, title="Software Engineering Intern"), ACTIVE_PROFILE), "internship")
+        self.assertEqual(persona_reject_reason(cand(1, title="Junior Backend Engineer"), ACTIVE_PROFILE), "junior")
+
+    def test_generic_senior_engineer_clears_rank_floor(self):
+        self.assertGreaterEqual(profile_score(cand(1, title="Senior Software Engineer", location="Remote - US"), ACTIVE_PROFILE), 20)
 
 
 class PersonaRejectTests(unittest.TestCase):

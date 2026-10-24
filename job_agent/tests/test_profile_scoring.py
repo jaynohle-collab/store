@@ -28,8 +28,10 @@ from job_agent.profile import ProfileLoadError, load_job_search_profile
 from job_agent.ranking.scoring import ProfileScoreCalculator
 from job_agent.workflow.example_gpt_input import SimpleJobNormalizer
 
+# Scorer mechanics are pinned to the original AI-focused persona so they do not
+# change whenever the active profile in data/ is retuned.
 PROFILE_PATH = (
-    Path(__file__).resolve().parent.parent.parent / "data" / "job_search_profile.json"
+    Path(__file__).resolve().parent / "fixtures" / "ai_focused_profile.json"
 )
 
 STRONG_AI_JD = (

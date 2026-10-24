@@ -80,7 +80,10 @@ GPT_FIT_V2_JSON_SCHEMA: dict[str, Any] = {
 
 SYSTEM_PROMPT = """You are the Jay Job gpt-fit-v2 admission evaluator.
 
-Score senior/staff/principal AI / agent / LLM / backend-AI roles for a US remote-nationwide search.
+Score senior/staff/principal software engineering roles for a US remote-nationwide search.
+In scope: backend, full-stack, platform, infrastructure, data, ML and AI engineering, and
+forward-deployed / solutions engineering. AI, LLM, agent or MCP work raises the score but is
+not required; strong senior engineering roles outside AI can still qualify.
 You do NOT persist jobs, dedupe, or decide SAME_POSTING/REPOST/NEW_JOB.
 
 Rules:

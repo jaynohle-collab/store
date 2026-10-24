@@ -117,12 +117,12 @@ describe("GPT relevance admission schemas", () => {
   it("rejects QUALIFIED below threshold and REJECTED_LOW_SCORE at/above threshold", () => {
     expect(() =>
       discoveryGptEvaluationRecordSchema.parse(
-        validEvaluation({ gpt_relevance_score: 69, gpt_decision: "QUALIFIED" }),
+        validEvaluation({ gpt_relevance_score: 59, gpt_decision: "QUALIFIED" }),
       ),
     ).toThrow();
     expect(() =>
       discoveryGptEvaluationRecordSchema.parse(
-        validEvaluation({ gpt_relevance_score: 70, gpt_decision: "REJECTED_LOW_SCORE" }),
+        validEvaluation({ gpt_relevance_score: 60, gpt_decision: "REJECTED_LOW_SCORE" }),
       ),
     ).toThrow();
   });
@@ -426,12 +426,12 @@ describe("production admission gate", () => {
     ).rejects.toThrow(/identity does not match/i);
   });
 
-  it("rejects score 69 / non-qualified stored evidence under production gate", async () => {
+  it("rejects score 59 / non-qualified stored evidence under production gate", async () => {
     const recorded = await recordDiscoveryEvaluations({
       evaluations: [
         validEvaluation({
           url: VALID_JOB.url,
-          gpt_relevance_score: 69,
+          gpt_relevance_score: 59,
           gpt_decision: "REJECTED_LOW_SCORE",
           reasoning_summary: "below threshold",
         }),
@@ -442,7 +442,7 @@ describe("production admission gate", () => {
         ...VALID_JOB,
         gpt_evaluation: {
           evaluation_id: String(recorded.evaluations[0].evaluation_id),
-          gpt_relevance_score: 69,
+          gpt_relevance_score: 59,
           gpt_decision: "QUALIFIED",
         },
       }),

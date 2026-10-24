@@ -187,10 +187,8 @@ describe("gpt-fit-v2 schema rules", () => {
   });
 
   it.each([
-    "HYBRID",
     "ONSITE",
     "NON_US",
-    "US_RESTRICTED",
     "UNKNOWN",
   ] as const)("rejects QUALIFIED for remote_scope %s", (scope) => {
     expect(() =>
@@ -198,6 +196,14 @@ describe("gpt-fit-v2 schema rules", () => {
         validV2Evaluation({ remote_scope: scope, gpt_decision: "QUALIFIED" }),
       ),
     ).toThrow();
+  });
+
+  it.each(["HYBRID", "US_RESTRICTED"] as const)("accepts QUALIFIED for US remote_scope %s", (scope) => {
+    expect(() =>
+      discoveryGptEvaluationRecordSchema.parse(
+        validV2Evaluation({ remote_scope: scope, gpt_decision: "QUALIFIED" }),
+      ),
+    ).not.toThrow();
   });
 
   it.each([

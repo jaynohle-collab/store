@@ -19,7 +19,7 @@ import {
 
 export const DEFAULT_GPT_EVALUATION_VERSION = "gpt-fit-v1";
 export const GPT_FIT_V2 = "gpt-fit-v2";
-export const GPT_QUALIFIED_THRESHOLD = 70;
+export const GPT_QUALIFIED_THRESHOLD = 60;
 export const GPT_REASONING_MAX_LEN = 1000;
 
 /** Canonical description fingerprint: sha256(normalized)[:16] hex. Empty = unavailable. */
@@ -44,6 +44,13 @@ export const REMOTE_SCOPES = [
 ] as const;
 
 export type RemoteScope = (typeof REMOTE_SCOPES)[number];
+
+/** US-based scopes that may be QUALIFIED (remote, state-restricted remote, hybrid). */
+export const QUALIFYING_REMOTE_SCOPES: readonly RemoteScope[] = ["US_NATIONWIDE", "US_RESTRICTED", "HYBRID"];
+
+export function isQualifyingRemoteScope(scope: string | null | undefined): boolean {
+  return scope != null && (QUALIFYING_REMOTE_SCOPES as readonly string[]).includes(scope);
+}
 
 export const POSTING_STATUSES = ["OPEN", "CLOSED", "UNKNOWN"] as const;
 
@@ -95,15 +102,15 @@ export function isGptFitV2(version: string | null | undefined): boolean {
 export function remoteScopeHardRejectionReason(scope: RemoteScope): string {
   switch (scope) {
     case "US_RESTRICTED":
-      return "remote role restricted to a specific city, state, or region";
+      return "US remote role restricted to specific states or cities";
     case "HYBRID":
-      return "hybrid role; gpt-fit-v2 requires fully remote US nationwide";
+      return "US hybrid role";
     case "ONSITE":
-      return "onsite role; gpt-fit-v2 requires fully remote US nationwide";
+      return "onsite-only role; gpt-fit-v2 requires US remote or hybrid";
     case "NON_US":
       return "non-US role";
     case "UNKNOWN":
-      return "remote scope unknown; gpt-fit-v2 requires US_NATIONWIDE";
+      return "remote scope unknown; gpt-fit-v2 requires US remote or hybrid";
     case "US_NATIONWIDE":
       return "US nationwide remote";
     default:
@@ -219,16 +226,16 @@ export const discoveryGptEvaluationRecordSchema = z
       });
     }
 
-    if (record.remote_scope && record.remote_scope !== "US_NATIONWIDE") {
+    if (record.remote_scope && !isQualifyingRemoteScope(record.remote_scope)) {
       if (record.gpt_decision === "QUALIFIED") {
         ctx.addIssue({
           code: "custom",
-          message: `gpt-fit-v2 QUALIFIED requires remote_scope=US_NATIONWIDE (got ${record.remote_scope})`,
+          message: `gpt-fit-v2 QUALIFIED requires remote_scope in US_NATIONWIDE/US_RESTRICTED/HYBRID (got ${record.remote_scope})`,
         });
       } else if (record.gpt_decision !== "REJECTED_HARD_RULE") {
         ctx.addIssue({
           code: "custom",
-          message: `gpt-fit-v2 non-US_NATIONWIDE remote_scope must use REJECTED_HARD_RULE (got ${record.gpt_decision})`,
+          message: `gpt-fit-v2 non-US remote_scope must use REJECTED_HARD_RULE (got ${record.gpt_decision})`,
         });
       }
     }

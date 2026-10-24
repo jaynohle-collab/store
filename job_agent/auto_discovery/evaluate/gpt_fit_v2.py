@@ -18,7 +18,7 @@ from job_agent.memory.fingerprint import compute_description_hash
 
 EVALUATION_VERSION = "gpt-fit-v2"
 NORMALIZATION_VERSION = "fingerprint-v1"
-GPT_QUALIFIED_THRESHOLD = 70
+GPT_QUALIFIED_THRESHOLD = 60
 REASONING_MAX = 1000
 
 REMOTE_SCOPES = frozenset(
@@ -31,6 +31,8 @@ REMOTE_SCOPES = frozenset(
         "UNKNOWN",
     }
 )
+# US-based scopes that may be QUALIFIED (owner policy: remote, state-restricted remote, hybrid).
+QUALIFYING_REMOTE_SCOPES = frozenset({'US_NATIONWIDE', 'US_RESTRICTED', 'HYBRID'})
 POSTING_STATUSES = frozenset({"OPEN", "CLOSED", "UNKNOWN"})
 GPT_DECISIONS = frozenset({"QUALIFIED", "REJECTED_LOW_SCORE", "REJECTED_HARD_RULE"})
 
@@ -80,7 +82,7 @@ GPT_FIT_V2_JSON_SCHEMA: dict[str, Any] = {
 
 SYSTEM_PROMPT = """You are the Jay Job gpt-fit-v2 admission evaluator.
 
-Score senior/staff/principal software engineering roles for a US remote-nationwide search.
+Score senior/staff/principal software engineering roles for a US-based search (remote, state-restricted remote, or hybrid anywhere in the US).
 In scope: backend, full-stack, platform, infrastructure, data, ML and AI engineering, and
 forward-deployed / solutions engineering. AI, LLM, agent or MCP work raises the score but is
 not required; strong senior engineering roles outside AI can still qualify.
@@ -88,10 +90,12 @@ You do NOT persist jobs, dedupe, or decide SAME_POSTING/REPOST/NEW_JOB.
 
 Rules:
 - gpt_relevance_score is an integer 0-100.
-- QUALIFIED requires score >= 70, remote_scope=US_NATIONWIDE, direct_posting_url_verified=true,
+- QUALIFIED requires score >= 60, remote_scope in US_NATIONWIDE / US_RESTRICTED / HYBRID,
+  direct_posting_url_verified=true,
   posting_status=OPEN, and a direct job posting URL (not a careers landing page).
-- REJECTED_LOW_SCORE when score < 70 and no hard rule failed.
-- REJECTED_HARD_RULE for closed roles, non-US / hybrid / onsite / restricted remote, junior roles,
+- REJECTED_LOW_SCORE when score < 60 and no hard rule failed.
+- Use remote_scope=HYBRID for US hybrid roles and US_RESTRICTED for remote limited to US states/cities.
+- REJECTED_HARD_RULE for closed roles, non-US, onsite-only, unknown location scope, junior roles,
   missing/invalid direct posting URL, or other hard exclusions. Include hard_rejection_reason.
 - hard_rejection_reason must be null unless gpt_decision is REJECTED_HARD_RULE.
 - reasoning_summary must be concise (<= 1000 chars).
@@ -164,21 +168,21 @@ def validate_model_output(raw: dict[str, Any]) -> dict[str, Any]:
         raise InvalidModelOutputError("hard_rejection_reason only allowed for REJECTED_HARD_RULE")
 
     if decision == "QUALIFIED" and score < GPT_QUALIFIED_THRESHOLD:
-        raise InvalidModelOutputError("QUALIFIED requires score >= 70")
+        raise InvalidModelOutputError(f"QUALIFIED requires score >= {GPT_QUALIFIED_THRESHOLD}")
     if decision == "REJECTED_LOW_SCORE" and score >= GPT_QUALIFIED_THRESHOLD:
-        raise InvalidModelOutputError("REJECTED_LOW_SCORE requires score < 70")
+        raise InvalidModelOutputError(f"REJECTED_LOW_SCORE requires score < {GPT_QUALIFIED_THRESHOLD}")
 
     # Fail closed: coerce illegal QUALIFIED combinations to hard reject rather than accept.
     if decision == "QUALIFIED":
-        if remote_scope != "US_NATIONWIDE":
-            raise InvalidModelOutputError("QUALIFIED requires remote_scope=US_NATIONWIDE")
+        if remote_scope not in QUALIFYING_REMOTE_SCOPES:
+            raise InvalidModelOutputError("QUALIFIED requires a US remote/restricted/hybrid remote_scope")
         if not direct_verified:
             raise InvalidModelOutputError("QUALIFIED requires direct_posting_url_verified=true")
         if posting_status != "OPEN":
             raise InvalidModelOutputError("QUALIFIED requires posting_status=OPEN")
 
-    if remote_scope != "US_NATIONWIDE" and decision != "REJECTED_HARD_RULE":
-        raise InvalidModelOutputError("non-US_NATIONWIDE must be REJECTED_HARD_RULE")
+    if remote_scope not in QUALIFYING_REMOTE_SCOPES and decision != "REJECTED_HARD_RULE":
+        raise InvalidModelOutputError("non-US remote_scope must be REJECTED_HARD_RULE")
     if posting_status != "OPEN" and decision != "REJECTED_HARD_RULE":
         raise InvalidModelOutputError("non-OPEN posting_status must be REJECTED_HARD_RULE")
 

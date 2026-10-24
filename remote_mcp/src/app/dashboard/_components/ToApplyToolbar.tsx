@@ -50,7 +50,7 @@ export function ToApplyToolbar({
       <select
         id="to-apply-remote"
         name="remote"
-        defaultValue={initialRemote || "remote_us"}
+        defaultValue={initialRemote || "all"}
         aria-label="Remote eligibility filter"
       >
         <option value="remote_us">Remote US only</option>

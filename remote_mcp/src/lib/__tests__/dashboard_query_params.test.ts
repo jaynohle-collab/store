@@ -67,9 +67,10 @@ describe("dashboard query params", () => {
     expect(parseAppliedSort(input)).toBe(expected);
   });
 
-  it("defaults remote filter to remote_us", () => {
-    expect(parseRemoteFilter(undefined)).toBe("remote_us");
+  it("defaults remote filter to all (US remote + hybrid)", () => {
+    expect(parseRemoteFilter(undefined)).toBe("all");
     expect(parseRemoteFilter("all")).toBe("all");
+    expect(parseRemoteFilter("remote_us")).toBe("remote_us");
   });
 
   it("preserves search sort and filter in query strings", () => {

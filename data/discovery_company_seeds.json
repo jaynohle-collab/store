@@ -1,5 +1,5 @@
 {
-  "catalog_version": "seeds-v2",
+  "catalog_version": "seeds-v3",
   "note": "ATS identifiers were confirmed against the public official ATS APIs. Every entry is re-verified by the expansion worker before it is enabled.",
   "companies": [
     {"company_key": "anthropic", "company_name": "Anthropic", "ats_provider": "greenhouse", "ats_org_id": "anthropic", "suggested_priority": "high"},
@@ -78,6 +78,24 @@
     {"company_key": "clickup", "company_name": "ClickUp", "ats_provider": "ashby", "ats_org_id": "clickup", "suggested_priority": "normal"},
     {"company_key": "cursor", "company_name": "Cursor", "ats_provider": "ashby", "ats_org_id": "cursor", "suggested_priority": "normal"},
     {"company_key": "sentry", "company_name": "Sentry", "ats_provider": "ashby", "ats_org_id": "sentry", "suggested_priority": "normal"},
-    {"company_key": "spotify", "company_name": "Spotify", "ats_provider": "lever", "ats_org_id": "spotify", "suggested_priority": "normal"}
+    {"company_key": "spotify", "company_name": "Spotify", "ats_provider": "lever", "ats_org_id": "spotify", "suggested_priority": "normal"},
+    {"company_key": "newrelic", "company_name": "New Relic", "ats_provider": "greenhouse", "ats_org_id": "newrelic", "suggested_priority": "normal"},
+    {"company_key": "zscaler", "company_name": "Zscaler", "ats_provider": "greenhouse", "ats_org_id": "zscaler", "suggested_priority": "normal"},
+    {"company_key": "planetscale", "company_name": "PlanetScale", "ats_provider": "greenhouse", "ats_org_id": "planetscale", "suggested_priority": "normal"},
+    {"company_key": "mixpanel", "company_name": "Mixpanel", "ats_provider": "greenhouse", "ats_org_id": "mixpanel", "suggested_priority": "normal"},
+    {"company_key": "gemini", "company_name": "Gemini", "ats_provider": "greenhouse", "ats_org_id": "gemini", "suggested_priority": "normal"},
+    {"company_key": "betterment", "company_name": "Betterment", "ats_provider": "greenhouse", "ats_org_id": "betterment", "suggested_priority": "normal"},
+    {"company_key": "oscar", "company_name": "Oscar Health", "ats_provider": "greenhouse", "ats_org_id": "oscar", "suggested_priority": "normal"},
+    {"company_key": "zocdoc", "company_name": "Zocdoc", "ats_provider": "greenhouse", "ats_org_id": "zocdoc", "suggested_priority": "normal"},
+    {"company_key": "peloton", "company_name": "Peloton", "ats_provider": "greenhouse", "ats_org_id": "peloton", "suggested_priority": "normal"},
+    {"company_key": "smartsheet", "company_name": "Smartsheet", "ats_provider": "greenhouse", "ats_org_id": "smartsheet", "suggested_priority": "normal"},
+    {"company_key": "coursera", "company_name": "Coursera", "ats_provider": "greenhouse", "ats_org_id": "coursera", "suggested_priority": "normal"},
+    {"company_key": "verkada", "company_name": "Verkada", "ats_provider": "greenhouse", "ats_org_id": "verkada", "suggested_priority": "normal"},
+    {"company_key": "temporal", "company_name": "Temporal", "ats_provider": "ashby", "ats_org_id": "temporal", "suggested_priority": "normal"},
+    {"company_key": "airbyte", "company_name": "Airbyte", "ats_provider": "ashby", "ats_org_id": "airbyte", "suggested_priority": "normal"},
+    {"company_key": "render", "company_name": "Render", "ats_provider": "ashby", "ats_org_id": "render", "suggested_priority": "normal"},
+    {"company_key": "railway", "company_name": "Railway", "ats_provider": "ashby", "ats_org_id": "railway", "suggested_priority": "normal"},
+    {"company_key": "watershed", "company_name": "Watershed", "ats_provider": "ashby", "ats_org_id": "watershed", "suggested_priority": "normal"},
+    {"company_key": "outreach", "company_name": "Outreach", "ats_provider": "lever", "ats_org_id": "outreach", "suggested_priority": "normal"}
   ]
 }

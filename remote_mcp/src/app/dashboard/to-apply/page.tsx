@@ -57,20 +57,25 @@ export default async function ToApplyPage({ searchParams }: Props) {
           <h1>To Apply</h1>
           <p>
             Active postings with save or save_repost recommendations and no active application.
-            Default view shows fully remote US nationwide roles only. Rank is Python profile-v1;
+            Default view shows US remote and hybrid roles. Rank is Python profile-v1;
             GPT Fit is admission evidence — separate scores.
           </p>
         </div>
       </div>
-      <ToApplyToolbar
-        initialQ={q}
-        initialSort={sort}
-        initialRemote={remote}
-        initialPageSize={pageSize}
-      />
       {error ? <div className="panel muted" role="alert">{error}</div> : null}
       <DashboardPagination basePath="/dashboard/to-apply" query={{ ...query, page }} pagination={pagination} />
-      <JobTable jobs={jobs} showActions />
+      <JobTable
+        jobs={jobs}
+        showActions
+        toolbar={
+          <ToApplyToolbar
+            initialQ={q}
+            initialSort={sort}
+            initialRemote={remote}
+            initialPageSize={pageSize}
+          />
+        }
+      />
       <DashboardPagination basePath="/dashboard/to-apply" query={{ ...query, page }} pagination={pagination} />
     </>
   );

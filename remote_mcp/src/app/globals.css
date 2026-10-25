@@ -392,25 +392,39 @@ table.jobs tr:hover td {
 }
 
 /* ---- Job table: selection, copy, sortable headers ---- */
-.selection-bar {
+.table-toolbar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.5rem;
-  padding: 0.55rem 0.75rem;
+  justify-content: space-between;
+  gap: 0.5rem 1rem;
+  padding: 0.6rem 0.75rem;
   margin-bottom: 0.6rem;
   border: 1px solid var(--border);
   border-radius: 10px;
   position: sticky;
   top: 0;
   z-index: 5;
-  background: var(--bg, #0f141b);
+  background: var(--bg-elevated, #151c26);
 }
-.selection-bar.active {
+.table-toolbar.active {
   border-color: var(--accent);
-  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 999px var(--accent-soft);
 }
-.selection-bar .btn[disabled] {
+.table-toolbar-search {
+  flex: 1 1 520px;
+  min-width: 0;
+}
+.table-toolbar-search .toolbar {
+  margin: 0;
+}
+.selection-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+.table-toolbar .btn[disabled] {
   opacity: 0.45;
   cursor: not-allowed;
 }

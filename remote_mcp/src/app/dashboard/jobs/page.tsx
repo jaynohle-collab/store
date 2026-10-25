@@ -46,9 +46,11 @@ export default async function AllJobsPage({ searchParams }: Props) {
           <p>Search company, title, posting URL, application URL, source, or external id.</p>
         </div>
       </div>
-      <JobsSearchForm initialQ={q} initialSort={sort} initialLifecycle={lifecycle} />
       {error ? <div className="panel muted">{error}</div> : null}
-      <JobTable jobs={jobs} />
+      <JobTable
+        jobs={jobs}
+        toolbar={<JobsSearchForm initialQ={q} initialSort={sort} initialLifecycle={lifecycle} />}
+      />
       {nextOffset != null ? (
         <p style={{ marginTop: "1rem" }}>
           <a href={`/dashboard/jobs?q=${encodeURIComponent(q || "")}&sort=${sort}&offset=${nextOffset}`}>

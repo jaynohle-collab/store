@@ -20,9 +20,11 @@ export function toClientJobs(jobs: Record<string, unknown>[]): Record<string, un
 export function JobTable({
   jobs,
   showActions = false,
+  toolbar,
 }: {
   jobs: Record<string, unknown>[];
   showActions?: boolean;
+  toolbar?: React.ReactNode;
 }) {
-  return <SelectableJobTable jobs={toClientJobs(jobs)} showActions={showActions} />;
+  return <SelectableJobTable jobs={toClientJobs(jobs)} showActions={showActions} toolbar={toolbar} />;
 }

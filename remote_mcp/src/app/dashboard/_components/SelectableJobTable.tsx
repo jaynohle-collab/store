@@ -41,7 +41,16 @@ function jobId(job: Job): string {
   return String(job.posting_id || job.id);
 }
 
-export function SelectableJobTable({ jobs, showActions = false }: { jobs: Job[]; showActions?: boolean }) {
+export function SelectableJobTable({
+  jobs,
+  showActions = false,
+  toolbar,
+}: {
+  jobs: Job[];
+  showActions?: boolean;
+  /** Search/filter form rendered on the same bar as the selection actions. */
+  toolbar?: React.ReactNode;
+}) {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [sortKey, setSortKey] = useState<SortKey | null>(null);
   const [dir, setDir] = useState<Dir>("asc");
@@ -104,12 +113,19 @@ export function SelectableJobTable({ jobs, showActions = false }: { jobs: Job[];
   }
 
   if (!jobs.length) {
-    return <div className="empty">No jobs match this view.</div>;
+    return (
+      <>
+        {toolbar ? <div className="table-toolbar"><div className="table-toolbar-search">{toolbar}</div></div> : null}
+        <div className="empty">No jobs match this view.</div>
+      </>
+    );
   }
 
   return (
     <>
-      <div className={`selection-bar${selected.size ? " active" : ""}`}>
+      <div className={`table-toolbar${selected.size ? " active" : ""}`}>
+        {toolbar ? <div className="table-toolbar-search">{toolbar}</div> : null}
+        <div className="selection-actions">
         <span className="muted">
           {selected.size ? `${selected.size} selected` : `${rows.length} jobs — tick rows to select`}
         </span>
@@ -128,6 +144,7 @@ export function SelectableJobTable({ jobs, showActions = false }: { jobs: Job[];
           </button>
         ) : null}
         {flash ? <span className="copy-flash" role="status">{flash}</span> : null}
+        </div>
       </div>
       <div className="table-wrap">
         <table className="jobs">

@@ -390,3 +390,74 @@ table.jobs tr:hover td {
     grid-template-columns: 1fr;
   }
 }
+
+/* ---- Job table: selection, copy, sortable headers ---- */
+.selection-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.55rem 0.75rem;
+  margin-bottom: 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: var(--bg, #0f141b);
+}
+.selection-bar.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+.selection-bar .btn[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.copy-flash {
+  color: var(--accent);
+  font-weight: 600;
+  margin-left: 0.25rem;
+}
+table.jobs th.sel,
+table.jobs td.sel {
+  width: 2rem;
+  text-align: center;
+}
+table.jobs input[type="checkbox"] {
+  width: 1rem;
+  height: 1rem;
+  cursor: pointer;
+  accent-color: var(--accent);
+}
+table.jobs tr.selected td {
+  background: var(--accent-soft);
+}
+table.jobs th.sortable {
+  padding: 0;
+}
+.th-sort {
+  all: unset;
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
+  width: 100%;
+  padding: inherit;
+  padding: 0.55rem 0.6rem;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.th-sort:hover {
+  color: var(--accent);
+}
+.th-sort .sort-arrow {
+  font-size: 0.7rem;
+  opacity: 0.45;
+}
+th.sorted .th-sort {
+  color: var(--accent);
+}
+th.sorted .sort-arrow {
+  opacity: 1;
+}

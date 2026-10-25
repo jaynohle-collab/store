@@ -1,0 +1,46 @@
+name: Apply database migration
+
+# Manual only. Applies one SQL file from remote_mcp/migrations to the production
+# Neon database (secret DATABASE_URL). Migrations are written to be idempotent.
+on:
+  workflow_dispatch:
+    inputs:
+      migration:
+        description: "File name in remote_mcp/migrations (e.g. 013_gpt_fit_v2_hybrid_threshold_60.sql)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: apply-migration
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate input
+        env:
+          MIGRATION: ${{ inputs.migration }}
+        run: |
+          if ! [[ "$MIGRATION" =~ ^[0-9]{3}_[a-z0-9_]+\.sql$ ]]; then echo "::error::invalid migration name"; exit 1; fi
+          test -f "remote_mcp/migrations/$MIGRATION" || { echo "::error::file not found"; exit 1; }
+          test -n "${{ secrets.DATABASE_URL != '' }}"
+      - name: Apply
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          MIGRATION: ${{ inputs.migration }}
+        run: |
+          sudo apt-get install -y -qq postgresql-client >/dev/null 2>&1 || true
+          psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -q -f "remote_mcp/migrations/$MIGRATION"
+          echo "applied $MIGRATION"
+      - name: Show resulting constraint
+        if: ${{ success() }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          psql "$DATABASE_URL" -At -c "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = 'discovery_gpt_evaluations_gpt_fit_v2_qualified_check'"

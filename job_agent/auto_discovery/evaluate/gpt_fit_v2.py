@@ -250,6 +250,8 @@ def evaluate_candidate(
     if not (description or "").strip():
         raise InvalidModelOutputError("description required for evaluation")
 
+    if hasattr(provider, "output_validator"):
+        provider.output_validator = validate_model_output
     try:
         raw = provider.complete_json(
             system=SYSTEM_PROMPT,

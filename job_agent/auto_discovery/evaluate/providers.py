@@ -601,6 +601,9 @@ class FallbackEvaluationProvider(EvaluationProvider):
         # Providers that are out for the rest of this run (denied key, daily quota).
         self._benched: set[str] = set()
         self._quota_strikes: dict[str, int] = {}
+        # Optional output check (e.g. gpt-fit-v2 schema). Invalid output from one
+        # provider moves to the next instead of failing the candidate.
+        self.output_validator: Callable[[dict[str, Any]], Any] | None = None
 
     @property
     def name(self) -> str:
@@ -623,6 +626,8 @@ class FallbackEvaluationProvider(EvaluationProvider):
                 continue
             try:
                 result = provider.complete_json(system=system, user=user, schema=schema)
+                if self.output_validator is not None:
+                    self.output_validator(result)
                 self._active = provider.name
                 self._quota_strikes[provider.name] = 0
                 return result
@@ -650,6 +655,9 @@ class FallbackEvaluationProvider(EvaluationProvider):
                     type(exc).__name__,
                 )
                 continue
+        if errors and all(e.endswith(":invalid_output") for e in errors):
+            # Every provider answered but none produced usable output.
+            raise InvalidModelOutputError("all providers returned invalid output: " + "; ".join(errors[:6]))
         raise AllProvidersUnavailableError(
             "all LLM providers unavailable: " + "; ".join(errors[:6])
         )
@@ -726,8 +734,7 @@ def resolve_provider(
             "needs AUTO_DISCOVERY_ALLOW_PAID_PROVIDERS=true)",
             category="validation",
         )
-    if len(providers) == 1:
-        return providers[0]
+    # Always wrap, so output validation and benching apply even with one provider.
     return FallbackEvaluationProvider(providers)
 
 

@@ -57,7 +57,7 @@ OK_PAYLOAD = {
 
 
 class ProviderFallbackTests(unittest.TestCase):
-    def test_resolve_provider_is_first_key_only_without_fallback_chain_when_single(self):
+    def test_resolve_provider_wraps_single_key_in_chain(self):
         with mock.patch.dict(
             os.environ,
             {"GEMINI_API_KEY": "g", "GROQ_API_KEY": "", "OPENAI_API_KEY": ""},
@@ -68,8 +68,10 @@ class ProviderFallbackTests(unittest.TestCase):
             os.environ.pop("OPENAI_API_KEY", None)
             os.environ["GEMINI_API_KEY"] = "g-key"
             provider = resolve_provider()
+            # Always a chain so output validation and benching apply.
+            self.assertIsInstance(provider, FallbackEvaluationProvider)
+            self.assertEqual(provider.provider_names, ["gemini"])
             self.assertEqual(provider.name, "gemini")
-            self.assertNotIsInstance(provider, FallbackEvaluationProvider)
 
     def test_resolve_provider_builds_runtime_fallback_chain(self):
         with mock.patch.dict(

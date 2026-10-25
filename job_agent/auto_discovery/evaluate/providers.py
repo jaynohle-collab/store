@@ -27,6 +27,8 @@ GEMINI_MAX_ATTEMPTS = 3
 GEMINI_BACKOFF_BASE_SECONDS = 2.0
 GEMINI_BACKOFF_CAP_SECONDS = 8.0
 GEMINI_RETRY_AFTER_CAP_SECONDS = 30.0
+# Consecutive quota errors before a provider is skipped for the rest of a run.
+BENCH_AFTER_QUOTA_STRIKES = 3
 _ERROR_MESSAGE_MAX = 160
 
 _SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
@@ -390,17 +392,29 @@ class GeminiProvider(EvaluationProvider):
         raise AssertionError("unreachable")  # pragma: no cover
 
 
-class GroqProvider(EvaluationProvider):
-    name = "groq"
+class OpenAICompatibleProvider(EvaluationProvider):
+    """Chat-completions client for OpenAI-compatible free tiers.
+
+    Subclasses set name, base URL, default model, and optional model filter.
+    Retired models (404) are replaced once from the provider's live /models list.
+    """
+
+    name = "openai_compatible"
+    base_url = ""
+    models_url: str | None = None
+    default_model = ""
+    json_mode = True
+    model_must_contain: str | None = None
+    extra_headers: dict[str, str] = {}
 
     def __init__(
         self,
         api_key: str,
-        model: str = "llama-3.3-70b-versatile",
+        model: str | None = None,
         transport: httpx.BaseTransport | None = None,
     ):
         self.api_key = api_key
-        self.model = model
+        self.model = model or self.default_model
         self._transport = transport
         self._model_rediscovered = False
         self._sleep = time.sleep
@@ -410,6 +424,7 @@ class GroqProvider(EvaluationProvider):
         return {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
+            **self.extra_headers,
         }
 
     def _rediscover_model(self) -> str | None:
@@ -423,7 +438,7 @@ class GroqProvider(EvaluationProvider):
         self._model_rediscovered = True
         try:
             with httpx.Client(transport=self._transport, timeout=30.0) as client:
-                response = client.get("https://api.groq.com/openai/v1/models", headers=self._headers())
+                response = client.get(self.models_url or f"{self.base_url}/models", headers=self._headers())
             if response.status_code >= 400:
                 return None
             ids = [
@@ -433,10 +448,13 @@ class GroqProvider(EvaluationProvider):
             ]
         except (httpx.HTTPError, ValueError, AttributeError):
             return None
+        if self.model_must_contain:
+            ids = [i for i in ids if self.model_must_contain in i]
         chosen = pick_groq_chat_model(ids, exclude=self.model)
         if chosen:
             logger.warning(
-                "groq model %s unavailable; switching to %s (set GROQ_MODEL to pin)",
+                "%s model %s unavailable; switching to %s (set the model variable to pin)",
+                self.name,
                 self.model,
                 chosen,
             )
@@ -451,10 +469,9 @@ class GroqProvider(EvaluationProvider):
         schema: dict[str, Any],
     ) -> dict[str, Any]:
         def _post() -> httpx.Response:
-            payload = {
+            payload: dict[str, Any] = {
                 "model": self.model,
                 "temperature": 0,
-                "response_format": {"type": "json_object"},
                 "messages": [
                     {"role": "system", "content": system},
                     {
@@ -463,15 +480,17 @@ class GroqProvider(EvaluationProvider):
                     },
                 ],
             }
+            if self.json_mode:
+                payload["response_format"] = {"type": "json_object"}
             try:
                 with httpx.Client(transport=self._transport, timeout=60.0) as client:
                     return client.post(
-                        "https://api.groq.com/openai/v1/chat/completions",
+                        f"{self.base_url}/chat/completions",
                         headers=self._headers(),
                         json=payload,
                     )
             except (httpx.TimeoutException, httpx.NetworkError, httpx.TransportError) as exc:
-                raise TransientProviderError(f"groq transport: {type(exc).__name__}") from None
+                raise TransientProviderError(f"{self.name} transport: {type(exc).__name__}") from None
 
         response = _post()
         if response.status_code == 404 and self._rediscover_model():
@@ -483,20 +502,92 @@ class GroqProvider(EvaluationProvider):
                 break  # daily / unknown quota: let the fallback chain decide
             waits += 1
             logger.info(
-                "groq per-minute rate limit; waiting %.1fs (%d/%d)",
+                "%s per-minute rate limit; waiting %.1fs (%d/%d)",
+                self.name,
                 delay,
                 waits,
                 self.max_rate_limit_waits,
             )
             self._sleep(delay)
             response = _post()
-        _raise_for_provider_http("groq", response.status_code, response.text)
+        _raise_for_provider_http(self.name, response.status_code, response.text)
         data = response.json()
         try:
             content = data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
-            raise InvalidModelOutputError("groq response missing content") from exc
+            raise InvalidModelOutputError(f"{self.name} response missing content") from exc
         return _parse_json_content(str(content))
+
+
+class GroqProvider(OpenAICompatibleProvider):
+    name = "groq"
+    base_url = "https://api.groq.com/openai/v1"
+    default_model = "llama-3.3-70b-versatile"
+
+
+class CerebrasProvider(OpenAICompatibleProvider):
+    name = "cerebras"
+    base_url = "https://api.cerebras.ai/v1"
+    default_model = "llama-3.3-70b"
+
+
+class GitHubModelsProvider(OpenAICompatibleProvider):
+    """GitHub Models free tier; in Actions the built-in GITHUB_TOKEN works (models: read)."""
+
+    name = "github_models"
+    base_url = "https://models.github.ai/inference"
+    models_url = "https://models.github.ai/catalog/models"
+    default_model = "openai/gpt-4.1-mini"
+
+
+class MistralProvider(OpenAICompatibleProvider):
+    name = "mistral"
+    base_url = "https://api.mistral.ai/v1"
+    default_model = "mistral-small-latest"
+
+
+class SambaNovaProvider(OpenAICompatibleProvider):
+    name = "sambanova"
+    base_url = "https://api.sambanova.ai/v1"
+    default_model = "Meta-Llama-3.3-70B-Instruct"
+    json_mode = False
+
+
+class NvidiaProvider(OpenAICompatibleProvider):
+    name = "nvidia"
+    base_url = "https://integrate.api.nvidia.com/v1"
+    default_model = "meta/llama-3.3-70b-instruct"
+    json_mode = False
+
+
+class OpenRouterProvider(OpenAICompatibleProvider):
+    """Only ':free' model ids are used, so this never incurs charges."""
+
+    name = "openrouter"
+    base_url = "https://openrouter.ai/api/v1"
+    default_model = "meta-llama/llama-3.3-70b-instruct:free"
+    model_must_contain = ":free"
+    extra_headers = {"X-Title": "store job discovery"}
+
+    def __init__(self, api_key: str, model: str | None = None, transport: httpx.BaseTransport | None = None):
+        if model and ":free" not in model:
+            raise AdapterError("OPENROUTER_MODEL must be a ':free' model id", category="validation")
+        super().__init__(api_key, model=model, transport=transport)
+
+
+# name -> (class, key env vars in priority order, model env var)
+FREE_OPENAI_COMPATIBLE: dict[str, tuple[type[OpenAICompatibleProvider], tuple[str, ...], str]] = {
+    "groq": (GroqProvider, ("GROQ_API_KEY",), "GROQ_MODEL"),
+    "cerebras": (CerebrasProvider, ("CEREBRAS_API_KEY",), "CEREBRAS_MODEL"),
+    "github_models": (GitHubModelsProvider, ("GITHUB_MODELS_TOKEN",), "GITHUB_MODELS_MODEL"),
+    "mistral": (MistralProvider, ("MISTRAL_API_KEY",), "MISTRAL_MODEL"),
+    "sambanova": (SambaNovaProvider, ("SAMBANOVA_API_KEY",), "SAMBANOVA_MODEL"),
+    "nvidia": (NvidiaProvider, ("NVIDIA_API_KEY",), "NVIDIA_MODEL"),
+    "openrouter": (OpenRouterProvider, ("OPENROUTER_API_KEY",), "OPENROUTER_MODEL"),
+}
+DEFAULT_PROVIDER_ORDER = (
+    "gemini", "groq", "cerebras", "github_models", "mistral", "sambanova", "nvidia", "openrouter", "openai",
+)
 
 
 class FallbackEvaluationProvider(EvaluationProvider):
@@ -507,6 +598,9 @@ class FallbackEvaluationProvider(EvaluationProvider):
             raise AdapterError("FallbackEvaluationProvider requires providers", category="validation")
         self.providers = list(providers)
         self._active = self.providers[0].name
+        # Providers that are out for the rest of this run (denied key, daily quota).
+        self._benched: set[str] = set()
+        self._quota_strikes: dict[str, int] = {}
 
     @property
     def name(self) -> str:
@@ -525,12 +619,22 @@ class FallbackEvaluationProvider(EvaluationProvider):
     ) -> dict[str, Any]:
         errors: list[str] = []
         for provider in self.providers:
+            if provider.name in self._benched:
+                continue
             try:
                 result = provider.complete_json(system=system, user=user, schema=schema)
                 self._active = provider.name
+                self._quota_strikes[provider.name] = 0
                 return result
             except TransientProviderError as exc:
                 errors.append(f"{provider.name}:{exc}")
+                if isinstance(exc, ProviderAuthError):
+                    self._benched.add(provider.name)
+                elif isinstance(exc, QuotaExhaustedError):
+                    strikes = self._quota_strikes.get(provider.name, 0) + 1
+                    self._quota_strikes[provider.name] = strikes
+                    if strikes >= BENCH_AFTER_QUOTA_STRIKES:
+                        self._benched.add(provider.name)
                 logger.warning(
                     "LLM provider %s transient failure (%s); trying next if available",
                     provider.name,
@@ -574,13 +678,11 @@ def configured_providers(
     available: dict[str, EvaluationProvider] = {}
     if gemini_key:
         available["gemini"] = GeminiProvider(gemini_key, transport=transport)
-    if groq_key:
-        groq_model = (os.environ.get("GROQ_MODEL") or "").strip()
-        available["groq"] = (
-            GroqProvider(groq_key, model=groq_model, transport=transport)
-            if groq_model
-            else GroqProvider(groq_key, transport=transport)
-        )
+    for pname, (cls, key_envs, model_env) in FREE_OPENAI_COMPATIBLE.items():
+        key = next((os.environ.get(k, "").strip() for k in key_envs if os.environ.get(k, "").strip()), "")
+        if key:
+            model = (os.environ.get(model_env) or "").strip() or None
+            available[pname] = cls(key, model=model, transport=transport)
     if openai_key and not (allow_paid or override == "openai"):
         logger.info(
             "OPENAI_API_KEY present but paid providers are disabled "
@@ -602,11 +704,13 @@ def configured_providers(
             )
         return [available[override]]
 
-    ordered: list[EvaluationProvider] = []
-    for name in ("gemini", "groq", "openai"):
-        if name in available:
-            ordered.append(available[name])
-    return ordered
+    custom = [
+        n.strip().lower()
+        for n in (os.environ.get("AUTO_DISCOVERY_PROVIDER_ORDER") or "").split(",")
+        if n.strip()
+    ]
+    order = custom + [n for n in DEFAULT_PROVIDER_ORDER if n not in custom]
+    return [available[n] for n in order if n in available]
 
 
 def resolve_provider(
@@ -617,7 +721,8 @@ def resolve_provider(
     providers = configured_providers(transport=transport)
     if not providers:
         raise AdapterError(
-            "no LLM API key configured (GEMINI_API_KEY / GROQ_API_KEY; OPENAI_API_KEY "
+            "no LLM API key configured (GEMINI/GROQ/CEREBRAS/MISTRAL/SAMBANOVA/NVIDIA/OPENROUTER "
+            "keys or GITHUB_MODELS_TOKEN; OPENAI_API_KEY "
             "needs AUTO_DISCOVERY_ALLOW_PAID_PROVIDERS=true)",
             category="validation",
         )

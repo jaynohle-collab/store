@@ -69,7 +69,7 @@ jobs:
       SAMBANOVA_API_KEY: ${{ secrets.SAMBANOVA_API_KEY }}
       NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-      GITHUB_MODELS_TOKEN: ${{ secrets.GITHUB_MODELS_TOKEN || github.token }}
+      GITHUB_MODELS_TOKEN: ${{ secrets.GITHUB_MODELS_TOKEN }}
       AUTO_DISCOVERY_PROVIDER_ORDER: ${{ vars.AUTO_DISCOVERY_PROVIDER_ORDER || '' }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.6-flash' }}

@@ -39,8 +39,9 @@ GPT_DECISIONS = frozenset({"QUALIFIED", "REJECTED_LOW_SCORE", "REJECTED_HARD_RUL
 DESCRIPTION_HASH_RE = re.compile(r"^([a-f0-9]{16})?$")
 
 
-class InvalidModelOutputError(ValueError):
-    """Model JSON failed schema / business validation (fail closed)."""
+# Single class shared with providers.py: the fallback chain must recognise the
+# validator's errors to try the next provider (separate classes broke that).
+from job_agent.auto_discovery.evaluate.providers import InvalidModelOutputError  # noqa: E402,F811
 
 
 GPT_FIT_V2_JSON_SCHEMA: dict[str, Any] = {

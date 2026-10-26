@@ -38,11 +38,13 @@ class FallbackValidationTests(unittest.TestCase):
         self.assertEqual(chain.complete_json(system="s", user="u", schema={}), {"ok": True})
         self.assertEqual(chain.name, "good")
 
-    def test_all_invalid_raises_invalid_output(self):
+    def test_all_invalid_is_outage_not_rejection(self):
         chain = FallbackEvaluationProvider([_Stub("a", {}), _Stub("b", {})])  # type: ignore[list-item]
         chain.output_validator = _validator
-        with self.assertRaises(InvalidModelOutputError):
+        with self.assertRaises(AllProvidersUnavailableError) as ctx:
             chain.complete_json(system="s", user="u", schema={})
+        self.assertNotIsInstance(ctx.exception, InvalidModelOutputError)
+        self.assertIn("invalid output", str(ctx.exception))
 
     def test_mixed_invalid_and_quota_is_outage(self):
         chain = FallbackEvaluationProvider(
@@ -55,6 +57,27 @@ class FallbackValidationTests(unittest.TestCase):
     def test_without_validator_behaviour_unchanged(self):
         chain = FallbackEvaluationProvider([_Stub("a", {"garbage": 1})])  # type: ignore[list-item]
         self.assertEqual(chain.complete_json(system="s", user="u", schema={}), {"garbage": 1})
+
+
+
+class RealValidatorTests(unittest.TestCase):
+    def test_real_gpt_fit_validator_errors_fall_through(self):
+        from job_agent.auto_discovery.evaluate.gpt_fit_v2 import validate_model_output
+        good_payload = {"ok": True}
+        bad = _Stub("bad", {"garbage": True})
+        good = _Stub("good", good_payload)
+        chain = FallbackEvaluationProvider([bad, good])  # type: ignore[list-item]
+        seen = []
+
+        def validator(raw):
+            seen.append(raw)
+            if raw is good_payload or raw == good_payload:
+                return raw
+            return validate_model_output(raw)  # raises the real error class
+
+        chain.output_validator = validator
+        self.assertEqual(chain.complete_json(system="s", user="u", schema={}), good_payload)
+        self.assertEqual(chain.name, "good")
 
 
 if __name__ == "__main__":

@@ -274,6 +274,21 @@ class ProviderOutageControlFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(metrics.candidates_evaluated, 0)
         self.assertEqual(groq.calls, metrics.candidates_evaluated)
 
+    async def test_all_invalid_output_queues_candidates_instead_of_rejecting(self):
+        # Regression for run 40233335701: HTTP 200 answers that fail validation
+        # must never reject jobs or put them on the no-evidence cooldown.
+        bad = SeqProvider("bad", [], success={"garbage": True})
+        chain = FallbackEvaluationProvider([bad])  # type: ignore[list-item]
+        store = OutageStore()
+
+        metrics, finish = await self._run(store, CountingAdapter(listings(10)), chain)
+
+        self.assertEqual(metrics.candidates_rejected, 0)
+        self.assertEqual(metrics.candidates_evaluated, 0)
+        self.assertTrue(metrics.provider_circuit_open)
+        self.assertGreater(metrics.candidates_queued, 0)
+        self.assertEqual(finish["status"], "partial")
+
     async def test_queue_growth_is_bounded_by_top_k_and_company_limit(self):
         store = OutageStore(companies=["acme", "globex", "initech"])
         metrics, _ = await self._run(

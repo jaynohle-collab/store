@@ -656,8 +656,12 @@ class FallbackEvaluationProvider(EvaluationProvider):
                 )
                 continue
         if errors and all(e.endswith(":invalid_output") for e in errors):
-            # Every provider answered but none produced usable output.
-            raise InvalidModelOutputError("all providers returned invalid output: " + "; ".join(errors[:6]))
+            # Every provider answered but none produced usable output. That is a
+            # provider-quality problem, not a verdict on the job: keep it pending
+            # (outage path) instead of rejecting it with a no-evidence cooldown.
+            raise AllProvidersUnavailableError(
+                "all providers returned invalid output: " + "; ".join(errors[:6])
+            )
         raise AllProvidersUnavailableError(
             "all LLM providers unavailable: " + "; ".join(errors[:6])
         )

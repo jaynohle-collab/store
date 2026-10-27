@@ -25,7 +25,7 @@ export const SUCCESS_INTERVAL_MS: Record<ScanPriority, number> = {
   manual: HOUR_MS,
   hot: 6 * HOUR_MS,
   high: 24 * HOUR_MS,
-  normal: 5 * DAY_MS,
+  normal: DAY_MS, // was 5d; daily rescans raise good links per day (only new postings are scored)
   inactive: 30 * DAY_MS,
 };
 

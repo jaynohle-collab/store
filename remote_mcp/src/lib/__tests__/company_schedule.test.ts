@@ -19,7 +19,7 @@ describe("company_schedule success intervals", () => {
     expect(successIntervalMs("manual")).toBe(1 * HOUR_MS);
     expect(successIntervalMs("hot")).toBe(6 * HOUR_MS);
     expect(successIntervalMs("high")).toBe(24 * HOUR_MS);
-    expect(successIntervalMs("normal")).toBe(5 * DAY_MS);
+    expect(successIntervalMs("normal")).toBe(1 * DAY_MS);
     expect(successIntervalMs("inactive")).toBe(30 * DAY_MS);
     expect(SUCCESS_INTERVAL_MS.hot).toBe(6 * HOUR_MS);
   });

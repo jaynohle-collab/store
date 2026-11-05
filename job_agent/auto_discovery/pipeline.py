@@ -4,7 +4,7 @@ Per claimed company:
 
 1. List lightweight postings from the official ATS (bounded).
 2. Structural + persona deterministic rejects (no network, no LLM).
-3. Pre-rank by persona score and keep ``max_listings_per_company``.
+3. Pre-rank by persona score and rotate a bounded listing window across runs.
 4. Identity preflight (known postings, prior applications, duplicates) and
    stored-evidence lookup for the active profile generation.
 5. Deterministic rank with novelty tiers; select the top 3–5.
@@ -702,6 +702,26 @@ class AutomaticDiscoveryPipeline:
             return "known_duplicate"
         return None
 
+    def _listing_window(
+        self, listings: list[LightweightCandidate], stats: Any
+    ) -> tuple[list[LightweightCandidate], int, int]:
+        """Rotate through score-ordered listings without expanding lookup bounds."""
+        limit = self.limits.max_listings_per_company
+        cursor = stats.get("listing_scan") if isinstance(stats, dict) else None
+        offset = 0
+        if (
+            len(listings) > limit
+            and isinstance(cursor, dict)
+            and cursor.get("profile_id") == self.identity.profile_id
+            and cursor.get("profile_version") == self.identity.profile_version
+        ):
+            saved = cursor.get("next_offset")
+            if type(saved) is int and 0 <= saved < len(listings):
+                offset = saved
+        window = (listings[offset:] + listings[:offset])[:limit]
+        next_offset = (offset + len(window)) % len(listings) if listings else 0
+        return window, offset, next_offset
+
     async def _scan_company(
         self,
         company: CompanyRecord,
@@ -711,11 +731,12 @@ class AutomaticDiscoveryPipeline:
         company_run_id = company.run_id
         company_qualified_before = len(qualified_jobs)
         today = datetime.now(timezone.utc).date()
-        memory = load_selection_memory(
+        stats = (
             (company.raw.get("company") or {}).get("stats")
             if isinstance(company.raw.get("company"), dict)
             else None
         )
+        memory = load_selection_memory(stats)
         company_metrics: dict[str, Any] = {}
         early_stop = False
         try:
@@ -736,13 +757,15 @@ class AutomaticDiscoveryPipeline:
             self.metrics.candidates_deterministic_rejected += len(rejected) + persona_rejected
             self.metrics.candidates_normalized += len(persona_ok)
 
-            # Listing breadth bound, chosen by persona score (never ATS order).
+            # Keep the same lookup budget, but do not permanently hide listings
+            # behind an already-known high-scoring prefix. ATS order is irrelevant.
             persona_ok.sort(
                 key=lambda c: (-profile_score(c, self.profile), candidate_key(c))
             )
+            window, scan_offset, next_scan_offset = self._listing_window(persona_ok, stats)
             considered = [
                 self._with_listing_hash(c)
-                for c in persona_ok[: self.limits.max_listings_per_company]
+                for c in window
             ]
 
             preflight = await self._preflight(considered) if considered else {}
@@ -772,6 +795,7 @@ class AutomaticDiscoveryPipeline:
             company_metrics = {
                 "listed": len(listed),
                 "considered": len(considered),
+                "listing_scan_offset": scan_offset,
                 "ranked": len(ranking.ranked),
                 "selected": len(ranking.selected),
                 "unchanged": len(ranking.unchanged),
@@ -910,6 +934,13 @@ class AutomaticDiscoveryPipeline:
                     len(qualified_jobs) - company_qualified_before
                 )
                 company_metrics[SELECTION_MEMORY_KEY] = trim_selection_memory(memory, today)
+                # A deferred scan may not have durably queued its selected work.
+                # Retry that window before advancing; failed scans never save it.
+                company_metrics["listing_scan"] = {
+                    "profile_id": self.identity.profile_id,
+                    "profile_version": self.identity.profile_version,
+                    "next_offset": scan_offset if early_stop else next_scan_offset,
+                }
                 if early_stop:
                     # Capacity / provider pause: candidates are preserved; release
                     # without failure backoff or consecutive_failures.

@@ -66,6 +66,10 @@ class AshbyAdapter(BaseAtsAdapter):
                 location = str(job.get("locationName") or "").strip()
             elif isinstance(job.get("address"), dict):
                 location = str(job["address"].get("postalAddress") or "").strip()
+            # The API may label a remote job only with a country or city. Keep
+            # that geographic scope; isRemote alone does not imply US eligibility.
+            if job.get("isRemote") is True and not re.search(r"\bremote\b", location, re.I):
+                location = f"Remote - {location}" if location else "Remote"
             published = str(job.get("publishedAt") or job.get("updatedAt") or "")[:10]
             posted = published if re.fullmatch(r"\d{4}-\d{2}-\d{2}", published or "") else ""
             out.append(

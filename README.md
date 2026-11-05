@@ -566,7 +566,7 @@ Migration `011_discovery_pending_evaluations.sql` adds a durable pending-evaluat
 
 The active persona is `data/job_search_profile.json` (`profile_id` + `profile_version`, override with `JOB_SEARCH_PROFILE_PATH`). Per company, Python:
 
-1. Lists broad lightweight ATS listings. The `MAX_LISTINGS_PER_COMPANY` bound keeps the best deterministic title/location matches, not the first N in ATS order.
+1. Lists broad lightweight ATS listings. The `MAX_LISTINGS_PER_COMPANY` bound takes a rotating window of deterministic title/location matches, starting with the highest scores, not the first N in ATS order. The window advances across successful scans so known high-scoring postings cannot permanently hide the rest of the returned listings. Lookup, full-description, and LLM budgets do not increase.
 2. Applies deterministic rejects before any full fetch or LLM call:
    - structural: closed or invalid postings;
    - persona: internship, junior, entry-level, frontend-only, pure DevOps/SRE, NYC onsite-only, and non-US locations.
@@ -579,7 +579,7 @@ The active persona is `data/job_search_profile.json` (`profile_id` + `profile_ve
    Unchanged evaluated listings are skipped, and ties are broken by stable candidate keys.
 6. Fetches full descriptions only for the top `TOP_CANDIDATES_PER_COMPANY`, and calls the LLM only when no reusable stored evidence exists.
 
-Rotation and starvation prevention: a per-company selection memory (stored in company run stats and bounded) does two things:
+Rotation and starvation prevention: a per-company listing cursor (stored in company run stats) resets for a new profile generation and stays on the current window after a capacity deferral. It only rotates listings returned by the adapter; it does not expand paginated ATS request limits. A bounded selection memory also does two things:
 - It suppresses re-churn when a listing's update date moves but its evidence was reused.
 - It gives a 7-day cooldown to candidates that produced no usable evidence, so they cannot block others.
 

@@ -398,6 +398,24 @@ class StateStore(FakeStore):
         }
 
 
+class RotatingStateStore(StateStore):
+    """Persist company metrics between fake scans, like the registry does."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.stats: dict[str, Any] = {}
+
+    async def claim_due_discovery_companies(self, payload=None):
+        result = await super().claim_due_discovery_companies(payload)
+        result["claims"][0]["company"]["stats"] = dict(self.stats)
+        return result
+
+    async def complete_discovery_company_run(self, payload):
+        result = await super().complete_discovery_company_run(payload)
+        self.stats.update(payload["metrics"])
+        return result
+
+
 def listings(n: int) -> list[LightweightCandidate]:
     titles = [
         "Senior AI Engineer", "Staff AI Engineer", "Principal AI Engineer",
@@ -446,6 +464,97 @@ class TopKPipelineTests(unittest.IsolatedAsyncioTestCase):
         titles = {c["title"] for c in preflight["candidates"]}
         self.assertNotIn("Recruiter", titles)
         self.assertNotIn("Account Executive", titles)
+
+    async def test_rotation_reaches_new_and_changed_jobs_beyond_known_top_100(self):
+        known = [cand(i, "Staff Platform Engineer") for i in range(1, 101)]
+        new = cand(101, "Senior Backend Engineer")
+        changed = cand(102, "Senior Backend Engineer", posted="2026-09-28")
+        self.assertGreater(profile_score(known[0], ACTIVE_PROFILE),
+                           profile_score(new, ACTIVE_PROFILE))
+        store = RotatingStateStore(
+            preflight={c.client_candidate_id: {"identity_status": "KNOWN_UNCHANGED"}
+                       for c in known[:50]},
+            states={c.client_candidate_id: {
+                "evaluation_id": f"e{c.external_job_id}",
+                "gpt_decision": "REJECTED_LOW_SCORE",
+                "description_hash": "aaaaaaaaaaaaaaaa",
+                "evaluated_at": "2026-09-27T00:00:00Z",
+            } for c in [*known[50:], changed]},
+        )
+        items = [new, changed, *known]
+        first = CountingAdapter(items)
+        metrics, provider = await self._run(store, first)
+        self.assertEqual(provider.calls, 0)
+        self.assertEqual(metrics.candidates_skipped, 50)
+        self.assertEqual(metrics.candidates_unchanged_skipped, 50)
+        self.assertEqual(store.stats["listing_scan"]["next_offset"], 100)
+
+        second = CountingAdapter(list(reversed(items)))
+        metrics, provider = await self._run(store, second)
+        self.assertEqual(set(second.fetched), {new.client_candidate_id, changed.client_candidate_id})
+        self.assertEqual(provider.calls, 2)
+        self.assertEqual(metrics.candidates_preflighted, 100)
+        self.assertEqual(metrics.candidates_selected, 2)
+        self.assertEqual(store.stats["listing_scan_offset"], 100)
+        self.assertEqual(store.stats["listing_scan"]["next_offset"], 98)
+        for name in ("check_discovery_candidates", "lookup_discovery_evaluation_states"):
+            requests = [p for n, p in store.calls if n == name]
+            self.assertEqual(len(requests), 2)
+            self.assertTrue(all(len(p["candidates"]) <= 100 for p in requests))
+
+    def test_listing_window_wraps_and_resets_invalid_or_old_profile_cursor(self):
+        pipe = AutomaticDiscoveryPipeline(
+            StateStore(), provider=FakeProvider(),
+            limits=DiscoveryLimits(max_listings_per_company=3),
+        )
+        items = listings(5)
+        cursor = {"profile_id": pipe.identity.profile_id,
+                  "profile_version": pipe.identity.profile_version, "next_offset": 3}
+        window, offset, next_offset = pipe._listing_window(items, {"listing_scan": cursor})
+        self.assertEqual(window, [*items[3:], items[0]])
+        self.assertEqual((offset, next_offset), (3, 1))
+        invalid_stats = [None, [], {}, {"listing_scan": []},
+                         {"listing_scan": {**cursor, "profile_version": "old"}},
+                         {"listing_scan": {**cursor, "profile_id": "another"}}]
+        invalid_stats.extend({"listing_scan": {**cursor, "next_offset": value}}
+                             for value in (-1, 5, 1000, True, "3", None))
+        for stats in invalid_stats:
+            with self.subTest(stats=stats):
+                window, offset, next_offset = pipe._listing_window(items, stats)
+                self.assertEqual(window, items[:3])
+                self.assertEqual((offset, next_offset), (0, 3))
+        self.assertEqual(pipe._listing_window([], {"listing_scan": cursor}), ([], 0, 0))
+        self.assertEqual(pipe._listing_window(items[:2], {"listing_scan": cursor}),
+                         (items[:2], 0, 0))
+
+    async def test_capacity_deferral_retries_current_listing_window(self):
+        store = RotatingStateStore()
+        store.stats["listing_scan"] = {
+            "profile_id": "jay", "profile_version": "jay-ai-v1", "next_offset": 4,
+        }
+        adapter = CountingAdapter([cand(i, "Staff Platform Engineer") for i in range(1, 11)])
+        metrics, provider = await self._run(
+            store, adapter, max_listings_per_company=4, max_evals_per_run=2,
+        )
+        self.assertEqual(provider.calls, 2)
+        self.assertEqual(metrics.companies_deferred, 1)
+        self.assertEqual(store.stats["listing_scan_offset"], 4)
+        self.assertEqual(store.stats["listing_scan"]["next_offset"], 4)
+
+    async def test_failed_scan_does_not_advance_listing_window(self):
+        for stage in ("list_jobs", "check_discovery_candidates"):
+            with self.subTest(stage=stage):
+                store = RotatingStateStore()
+                cursor = {"profile_id": "jay", "profile_version": "jay-ai-v1", "next_offset": 4}
+                store.stats["listing_scan"] = dict(cursor)
+                adapter = CountingAdapter(listings(10))
+                target = adapter if stage == "list_jobs" else store
+                with mock.patch.object(target, stage, side_effect=AdapterError("failed")):
+                    metrics, provider = await self._run(store, adapter, max_listings_per_company=4)
+                self.assertEqual(metrics.companies_failed, 1)
+                self.assertEqual(provider.calls, 0)
+                self.assertEqual(store.stats["listing_scan"], cursor)
+                self.assertFalse(any(n == "complete_discovery_company_run" for n, _ in store.calls))
 
     async def test_unchanged_evidence_skips_fetch_and_llm(self):
         items = listings(4)

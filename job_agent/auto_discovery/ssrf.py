@@ -17,6 +17,10 @@ ATS_API_HOSTS = frozenset(
         "jobs.ashbyhq.com",
         "api.lever.co",
         "jobs.lever.co",
+        "api.smartrecruiters.com",
+        "jobs.smartrecruiters.com",
+        "www.smartrecruiters.com",
+        "careers.smartrecruiters.com",
     }
 )
 
@@ -98,3 +102,4 @@ def assert_safe_ats_url(
         raise AdapterError(f"host not allowlisted: {host}", category="ssrf_blocked")
 
     return raw
+

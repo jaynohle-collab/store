@@ -11,6 +11,7 @@ from job_agent.auto_discovery.adapters.base import AtsAdapter, BaseAtsAdapter
 from job_agent.auto_discovery.adapters.company_careers import CompanyCareersAdapter
 from job_agent.auto_discovery.adapters.greenhouse import GreenhouseAdapter
 from job_agent.auto_discovery.adapters.lever import LeverAdapter
+from job_agent.auto_discovery.adapters.smartrecruiters import SmartRecruitersAdapter
 from job_agent.auto_discovery.adapters.workday import WorkdayAdapter
 from job_agent.auto_discovery.http_client import SafeHttpClient
 from job_agent.auto_discovery.types import AdapterError
@@ -19,6 +20,7 @@ _FACTORY: dict[str, Callable[[SafeHttpClient | None], BaseAtsAdapter]] = {
     "greenhouse": GreenhouseAdapter,
     "ashby": AshbyAdapter,
     "lever": LeverAdapter,
+    "smartrecruiters": SmartRecruitersAdapter,
     "workday": WorkdayAdapter,
     "company_careers": CompanyCareersAdapter,
 }
@@ -49,3 +51,4 @@ def get_adapter(
 
 def supported_providers() -> frozenset[str]:
     return frozenset(_FACTORY)
+

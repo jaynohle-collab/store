@@ -25,6 +25,7 @@ export const CANDIDATE_ATS_PROVIDERS = [
   "ashby",
   "lever",
   "workday",
+  "smartrecruiters",
   "company_careers",
 ] as const;
 
@@ -385,7 +386,8 @@ export async function listDiscoveryPostingUrlHints(
   const sql = getSql();
   const pattern =
     "^https://(boards|job-boards)\\.greenhouse\\.io/|^https://jobs\\.ashbyhq\\.com/|" +
-    "^https://jobs\\.lever\\.co/|^https://[a-z0-9-]+\\.wd[0-9]+\\.myworkdayjobs\\.com/";
+    "^https://jobs\\.lever\\.co/|^https://[a-z0-9-]+\\.wd[0-9]+\\.myworkdayjobs\\.com/|" +
+    "^https://(www|jobs)\\.smartrecruiters\\.com/[a-z0-9][a-z0-9._-]*/[0-9]+(-[^/?#]+)?/?([?#].*)?$";
   const rows = await sql`
     SELECT url, company, origin FROM (
       SELECT DISTINCT ON (p.url) p.url, c.company, 'posting_history' AS origin
@@ -426,3 +428,4 @@ export async function getCompanyExpansionSummary() {
   }
   return counts;
 }
+

@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_SEED_PATH = Path(__file__).resolve().parents[2] / "data" / "discovery_company_seeds.json"
 
-VERIFIABLE_PROVIDERS = frozenset({"greenhouse", "ashby", "lever", "workday"})
+VERIFIABLE_PROVIDERS = frozenset({"greenhouse", "ashby", "lever", "workday", "smartrecruiters"})
 _COMPANY_KEY_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 _ORG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._|-]{0,255}$")
 
@@ -48,6 +48,10 @@ _LEVER_URL_RE = re.compile(
 _WORKDAY_URL_RE = re.compile(
     r"^https://([a-z0-9][a-z0-9-]{0,62})\.(wd\d{1,2})\.myworkdayjobs\.com/"
     r"(?:[a-z]{2}-[A-Z]{2}/)?([A-Za-z0-9_-]{1,100})/job/",
+)
+_SMARTRECRUITERS_URL_RE = re.compile(
+    r"^https://(?:jobs|www)\.smartrecruiters\.com/([A-Za-z0-9][A-Za-z0-9._-]{0,99})/\d+(?:-[^/?#]+)?/?(?:[?#].*)?$",
+    re.IGNORECASE,
 )
 
 # Verification failures that will never succeed on retry.
@@ -85,6 +89,10 @@ def parse_ats_posting_url(url: str) -> tuple[str, str] | None:
         match = pattern.match(raw)
         if match:
             return provider, match.group(1).lower()
+    match = _SMARTRECRUITERS_URL_RE.match(raw)
+    if match:
+        # Preserve the spelling in the official URL; dedupe is case-insensitive.
+        return "smartrecruiters", match.group(1)
     match = _WORKDAY_URL_RE.match(raw)
     if match:
         tenant, shard, site = match.groups()
@@ -99,6 +107,8 @@ def careers_url_for(provider: str, org: str) -> str | None:
         return f"https://jobs.ashbyhq.com/{org}"
     if provider == "lever":
         return f"https://jobs.lever.co/{org}"
+    if provider == "smartrecruiters":
+        return f"https://careers.smartrecruiters.com/{org}"
     if provider == "workday":
         parts = org.split("|")
         if len(parts) == 3:
@@ -336,3 +346,4 @@ class CompanyExpansionWorker:
             if self.http is None:
                 http.close()
         return summary
+

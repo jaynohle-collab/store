@@ -156,6 +156,11 @@ def classify_location(location: str | None) -> str:
     text = (location or "").strip()
     if not text:
         return "unknown"
+    # Adapters with a structured country retain it as '(country: XX)'. It is
+    # stronger evidence than ambiguous free-text city or state abbreviations.
+    country = re.search(r"\(country: ([A-Za-z]{2,3})\)", text)
+    if country:
+        return "us" if country.group(1).upper() in {"US", "USA"} else "non_us"
     if _US_MARKERS_RE.search(text) or _US_STATE_RE.search(text):
         return "us"
     if _NON_US_MARKERS_RE.search(text):
@@ -383,3 +388,4 @@ def trim_selection_memory(
     ]
     kept.sort(key=lambda kv: (str(kv[1].get("at") or ""), kv[0]), reverse=True)
     return dict(kept[:SELECTION_MEMORY_MAX_ENTRIES])
+

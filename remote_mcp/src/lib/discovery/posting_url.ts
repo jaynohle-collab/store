@@ -256,6 +256,25 @@ export function classifyPostingUrl(url: string | null | undefined): PostingUrlCl
   const pathname = parsed.pathname || "/";
   const segments = pathSegments(pathname);
 
+  // Only official applicant hosts and numeric posting paths are deterministic.
+  // Handle API/careers hosts before generic query/path heuristics.
+  if (host === "api.smartrecruiters.com") {
+    return { url_class: "MISSING_POSTING_ID", is_obviously_invalid: true, reason: "smartrecruiters API is not an applicant destination" };
+  }
+  if (host === "careers.smartrecruiters.com") {
+    return { url_class: "CAREERS_HOME", is_obviously_invalid: true, reason: "smartrecruiters careers landing" };
+  }
+  if (host === "www.smartrecruiters.com" || host === "jobs.smartrecruiters.com") {
+    if (/^\/[a-z0-9][a-z0-9._-]*\/\d+(?:-[^/?#]+)?\/?$/i.test(pathname)) {
+      return { url_class: "DIRECT_POSTING", is_obviously_invalid: false, reason: "smartrecruiters numeric posting id" };
+    }
+    return {
+      url_class: segments.length <= 1 ? "JOBS_LANDING" : "MISSING_POSTING_ID",
+      is_obviously_invalid: true,
+      reason: "smartrecruiters URL missing numeric posting path",
+    };
+  }
+
   if (isRecognizedAtsHost(host)) {
     return classifyRecognizedAts(host, pathname, segments, parsed);
   }
@@ -343,3 +362,4 @@ export function classifyPostingUrl(url: string | null | undefined): PostingUrlCl
 export function isDeterministicallyInvalidPostingUrl(url: string | null | undefined): boolean {
   return classifyPostingUrl(url).is_obviously_invalid;
 }
+

@@ -1,6 +1,6 @@
 {
-  "catalog_version": "seeds-v4",
-  "note": "Curated employer ATS identifiers: existing entries retain prior verification; v4 additions have official identity evidence documented in docs/existing-ats-seed-provenance.md. Every candidate must pass public ATS API verification by the expansion worker before it is enabled.",
+  "catalog_version": "seeds-v5",
+  "note": "Curated employer ATS identifiers: the 110 seeds already on main are preserved; v5 adds two public-API-verified SmartRecruiters boards documented in docs/discovery-seed-provenance.md. Every candidate must pass public ATS API verification by the expansion worker before it is enabled.",
   "companies": [
     {"company_key": "anthropic", "company_name": "Anthropic", "ats_provider": "greenhouse", "ats_org_id": "anthropic", "suggested_priority": "high"},
     {"company_key": "databricks", "company_name": "Databricks", "ats_provider": "greenhouse", "ats_org_id": "databricks", "suggested_priority": "high"},
@@ -111,7 +111,8 @@
     {"company_key": "orum", "company_name": "Orum", "ats_provider": "ashby", "ats_org_id": "orum", "suggested_priority": "normal"},
     {"company_key": "unit", "company_name": "Unit", "ats_provider": "ashby", "ats_org_id": "unit", "suggested_priority": "normal"},
     {"company_key": "protege", "company_name": "Protege", "ats_provider": "ashby", "ats_org_id": "protege", "suggested_priority": "normal"},
-    {"company_key": "swarm-aero", "company_name": "Swarm Aero", "ats_provider": "ashby", "ats_org_id": "swarmaero", "suggested_priority": "normal"}
+    {"company_key": "swarm-aero", "company_name": "Swarm Aero", "ats_provider": "ashby", "ats_org_id": "swarmaero", "suggested_priority": "normal"},
+    {"company_key": "nexthink", "company_name": "Nexthink", "ats_provider": "smartrecruiters", "ats_org_id": "Nexthink", "suggested_priority": "normal"},
+    {"company_key": "shippeo", "company_name": "Shippeo", "ats_provider": "smartrecruiters", "ats_org_id": "Shippeo", "suggested_priority": "normal"}
   ]
 }
-

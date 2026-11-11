@@ -1,6 +1,6 @@
 # SmartRecruiters source expansion
 
-Based on repository main `78ffd63023f30683b6ef3150985a31c4c30d248f`.
+Reconciled with repository main `d5dd4b33d21374c1f4ea6f68e4c7478983d6f8d6` after PR #41. The existing 110 seeds and the catalog batching/identity tests from that PR are retained.
 
 ## Behavior
 
@@ -23,9 +23,9 @@ Based on repository main `78ffd63023f30683b6ef3150985a31c4c30d248f`.
   text. A remote flag alone does not establish US eligibility. Existing profile,
   remote/hybrid eligibility, scoring, deduplication, and admission gates remain
   in force; none of their thresholds or preferences are changed.
-- Expands candidate seed inventory from 95 to 112. The 17 added employer board
-  identities were corroborated with official ATS pages. Nexthink and Shippeo
-  additionally returned valid public API payloads with 64 and 5 total postings
+- Expands candidate seed inventory from 110 to 112, preserving all existing
+  employer entries and adding only Nexthink and Shippeo. These two boards
+  returned valid public API payloads with 64 and 5 total postings
   on 2026-11-09. These are global counts across all roles, not qualifying US
   remote/hybrid matches. See [seed provenance](discovery-seed-provenance.md).
 
@@ -56,28 +56,30 @@ Validation results:
   regex flags incompatible with the configured target; none are in changed files.
 - Independent code review and `git diff --check` passed.
 
-This source patch does not claim a green full build or repair unrelated
-dependency/test problems.
+Those are the original local-environment results. The original PR head subsequently passed GitHub CI: all 340 Python tests, 549 Remote MCP tests, and the production Next.js build. Reconciled-head CI must pass again before integration; this conflict resolution does not change runtime code or repair unrelated local dependency issues.
 
 ## Deployment order (not performed)
 
-1. Review and merge the source change only when publication/deployment is
-   authorized. Resolve required CI failures in the proper dependency environment.
-2. Apply `remote_mcp/migrations/016_smartrecruiters_company_candidates.sql` to the
-   intended database. It only replaces the candidate provider CHECK constraint;
-   the enabled-company registry already supports SmartRecruiters. It preserves
-   rows, preferences, statuses and all previously accepted providers, and is
-   safe to reapply. Migration 015 is intentionally not included: it belongs to
-   separate unmerged work and is not a dependency of 016.
-3. Deploy the matching Remote MCP build before running the updated producer.
-   The API must accept SmartRecruiters candidate upserts and its database must
-   accept the provider before the seed batch can be sent. Otherwise the new
-   seed batch can fail validation instead of expanding the inventory.
-4. Use the updated Python producer and seed catalog. Run the existing company
-   expansion with normal budgets and verification enabled. Each candidate still
-   needs a successful public ATS API verification before it becomes enabled;
-   no seed addition bypasses that check. The 17 additions can take multiple
-   runs to verify under the current per-run bound and any older pending backlog.
+1. Review passing CI on the exact reconciled head. Do not merge yet: main is
+   connected to automatic deployment. The current main rules require linear
+   history, so any later authorized integration must use a supported squash or
+   rebase merge without bypassing rules.
+2. Before merging, verify the production database identity, current candidate
+   provider constraint, and lack of active discovery workers. Apply
+   `remote_mcp/migrations/016_smartrecruiters_company_candidates.sql` only with
+   separate rollout authorization and bounded lock/statement timeouts, then
+   verify the resulting `discovery_company_candidates_provider_check`. The
+   migration only expands accepted providers and preserves existing rows and
+   candidate state. Migration 015 is not a dependency. No migration was run.
+3. After migration verification, merge only when production rollout is
+   authorized. Wait for the matching Remote MCP deployment and health check
+   before permitting the updated producer to submit SmartRecruiters candidates.
+   The API and database must both accept the provider before its seed batch is
+   sent. Coordinate the scheduled producer to avoid a deployment race.
+4. Let the updated producer offer the reconciled seed catalog with normal
+   budgets and verification enabled. Each of the two new candidates still needs
+   successful public ATS API verification before becoming enabled. Verification
+   may take multiple scheduled runs because of per-run bounds and pending work.
 5. Inspect expansion outcomes and discovery metrics separately: boards verified,
    listings fetched, descriptions evaluated, and qualifying jobs admitted.
    Existing budgets are unchanged, so inventory breadth does not guarantee

@@ -5,7 +5,7 @@ import unittest
 import httpx
 
 from job_agent.auto_discovery.adapters.registry import get_adapter, supported_providers
-from job_agent.auto_discovery.expansion import history_candidates, parse_ats_posting_url, verify_candidate
+from job_agent.auto_discovery.expansion import history_candidates, load_seed_catalog, parse_ats_posting_url, verify_candidate
 from job_agent.auto_discovery.http_client import SafeHttpClient
 from job_agent.auto_discovery.ranking import classify_location, persona_reject_reason
 from job_agent.auto_discovery.ssrf import assert_safe_ats_url
@@ -25,6 +25,18 @@ def posting(job_id=123, **changes):
 
 
 class SmartRecruitersTests(unittest.TestCase):
+    def test_reconciled_catalog_retains_verified_smartrecruiters_boards(self):
+        seeds = {seed["company_key"]: seed for seed in load_seed_catalog()}
+        for key, identifier in (("nexthink", "Nexthink"), ("shippeo", "Shippeo")):
+            with self.subTest(company=key):
+                self.assertIn(key, seeds)
+                self.assertEqual(seeds[key]["ats_provider"], "smartrecruiters")
+                self.assertEqual(seeds[key]["ats_org_id"], identifier)
+                self.assertEqual(
+                    seeds[key]["careers_url"],
+                    f"https://careers.smartrecruiters.com/{identifier}",
+                )
+
     def adapter(self, handler):
         self.http = SafeHttpClient(transport=httpx.MockTransport(handler), max_retries=0)
         self.addCleanup(self.http.close)

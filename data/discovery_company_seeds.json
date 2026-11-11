@@ -1,6 +1,6 @@
 {
-  "catalog_version": "seeds-v4",
-  "note": "Curated employer ATS identifiers: existing entries retain prior verification; v4 additions have official identity evidence, with live API verification for the two SmartRecruiters boards, documented in docs/discovery-seed-provenance.md. Every candidate must pass public ATS API verification by the expansion worker before it is enabled.",
+  "catalog_version": "seeds-v5",
+  "note": "Curated employer ATS identifiers: the 110 seeds already on main are preserved; v5 adds two public-API-verified SmartRecruiters boards documented in docs/discovery-seed-provenance.md. Every candidate must pass public ATS API verification by the expansion worker before it is enabled.",
   "companies": [
     {"company_key": "anthropic", "company_name": "Anthropic", "ats_provider": "greenhouse", "ats_org_id": "anthropic", "suggested_priority": "high"},
     {"company_key": "databricks", "company_name": "Databricks", "ats_provider": "greenhouse", "ats_org_id": "databricks", "suggested_priority": "high"},

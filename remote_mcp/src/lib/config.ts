@@ -17,6 +17,8 @@ export const SCOPES = {
 export type JobScope = (typeof SCOPES)[keyof typeof SCOPES];
 
 export const TOOL_PERMISSIONS: Record<string, JobScope> = {
+  reserve_haiku_attempt: SCOPES.WORKER,
+  claim_haiku_attempt: SCOPES.WORKER,
   // Legacy PoC jobs table
   get_job: SCOPES.READ,
   search_jobs: SCOPES.READ,

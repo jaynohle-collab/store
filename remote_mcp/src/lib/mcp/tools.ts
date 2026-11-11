@@ -1,3 +1,4 @@
+import { registerHaikuBudgetTools } from "./haiku_budget_tools";
 import type { AuthInfo, McpServer } from "@modelcontextprotocol/server";
 import { z } from "zod";
 
@@ -45,6 +46,7 @@ function errorResult(message: string) {
 }
 
 export function registerJobTools(server: McpServer): void {
+  registerHaikuBudgetTools(server);
   registerLifecycleTools(server);
   registerEvaluationTools(server);
   registerInboxTools(server);

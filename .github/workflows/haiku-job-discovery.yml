@@ -1,0 +1,67 @@
+name: Haiku Job Discovery
+
+# Manual-only rollout. The existing scheduled workflow can use Haiku after the
+# same explicit approval gate is set. Never print or probe the secret value.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Share the producer lock with the scheduled workflow. Database limits still
+# apply to all callers, including local processes and other workflows.
+concurrency:
+  group: automatic-job-discovery
+  cancel-in-progress: false
+
+jobs:
+  haiku-discovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      JOB_PERSISTENCE_MODE: remote
+      JOB_MCP_URL: https://jay-job-mcp.vercel.app/api/mcp
+      AUTH0_TOKEN_URL: https://jay-job.us.auth0.com/oauth/token
+      AUTH0_AUDIENCE: https://jay-job-mcp-michaeltchueng-2909s-projects.vercel.app/api/mcp
+      AUTH0_SCOPES: jobs:read jobs:write jobs:worker
+      AUTH0_CLIENT_ID: ${{ secrets.AUTH0_CLIENT_ID }}
+      AUTH0_CLIENT_SECRET: ${{ secrets.AUTH0_CLIENT_SECRET }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      ANTHROPIC_MODEL: claude-haiku-5-5
+      AUTO_DISCOVERY_LLM_PROVIDER: anthropic
+      HAIKU_PAID_EXECUTION_APPROVED: ${{ vars.HAIKU_PAID_EXECUTION_APPROVED || 'false' }}
+      AUTO_DISCOVERY_ALLOW_PAID_PROVIDERS: 'false'
+      AUTO_DISCOVERY_WORKER_IDENTITY: github-actions
+      AUTO_DISCOVERY_MAX_COMPANIES_PER_RUN: '5'
+      AUTO_DISCOVERY_TOP_CANDIDATES_PER_COMPANY: '5'
+      # This is only a work-per-run limit. The DB enforces 50/day across runs.
+      AUTO_DISCOVERY_MAX_EVALS_PER_RUN: '50'
+      DISCOVERY_INBOX_WORKER_IDENTITY: github-actions
+    steps:
+      - name: Verify approved rollout and required configuration
+        id: approval
+        run: |
+          set -euo pipefail
+          if [ "${HAIKU_PAID_EXECUTION_APPROVED}" != "true" ]; then
+            echo "::error::Haiku is disabled pending daily/monthly cost-control review and approval."
+            exit 1
+          fi
+          for name in AUTH0_CLIENT_ID AUTH0_CLIENT_SECRET ANTHROPIC_API_KEY; do
+            if [ -z "${!name}" ]; then
+              echo "::error::${name} is not configured"
+              exit 1
+            fi
+          done
+          echo "Haiku configuration present; secret values are never logged."
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Evaluate jobs with guarded Haiku
+        run: python -m job_agent.examples.automatic_discovery_run --max-companies 5 --skip-inbox-handoff
+      - name: Process pending discovery inbox batches
+        if: ${{ !cancelled() && steps.approval.outcome == 'success' }}
+        run: python -m job_agent.examples.process_discovery_inbox --limit 5 --recover-stale --fail-on-batch-failure

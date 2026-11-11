@@ -83,6 +83,32 @@ class ParseTests(unittest.TestCase):
 
 
 class SeedCatalogTests(unittest.TestCase):
+    def test_identity_verified_existing_provider_additions(self):
+        expected = {
+            "browserbase": ("greenhouse", "browserbaseinc"),
+            "hex": ("ashby", "hex"),
+            "ashby": ("ashby", "ashby"),
+            "maybern": ("ashby", "maybern"),
+            "monte-carlo": ("ashby", "montecarlodata"),
+            "newtonx": ("ashby", "newtonx"),
+            "middesk": ("ashby", "middesk"),
+            "sardine": ("ashby", "sardine"),
+            "deel": ("ashby", "deel"),
+            "zip": ("ashby", "zip"),
+            "xbow": ("ashby", "xbowcareers"),
+            "orum": ("ashby", "orum"),
+            "unit": ("ashby", "unit"),
+            "protege": ("ashby", "protege"),
+            "swarm-aero": ("ashby", "swarmaero"),
+        }
+        seeds = {s["company_key"]: s for s in load_seed_catalog()}
+        for key, identity in expected.items():
+            with self.subTest(company=key):
+                self.assertIn(key, seeds)
+                self.assertEqual(
+                    (seeds[key]["ats_provider"], seeds[key]["ats_org_id"]), identity
+                )
+
     def test_repository_seed_catalog_is_valid_and_unique(self):
         seeds = load_seed_catalog()
         self.assertGreaterEqual(len(seeds), 20)
@@ -174,6 +200,26 @@ class FakeExpansionStore:
 
 
 class WorkerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_full_seed_catalog_uses_bounded_batches_without_verification(self):
+        seeds = load_seed_catalog()
+        self.assertGreater(len(seeds), 100)
+        store = FakeExpansionStore()
+        summary = await CompanyExpansionWorker(
+            store,  # type: ignore[arg-type]
+            limits=DiscoveryLimits(max_verifications_per_run=0),
+        ).run(include_history=False)
+        upserts = [p["candidates"] for n, p in store.calls if n == "upsert"]
+        self.assertEqual([s for batch in upserts for s in batch], seeds)
+        self.assertTrue(all(0 < len(batch) <= 100 for batch in upserts))
+        self.assertEqual(len(upserts), (len(seeds) + 99) // 100)
+        self.assertEqual(len(upserts[0]), 100)
+        self.assertEqual(summary.seeds_offered, len(seeds))
+        self.assertEqual(summary.candidates_inserted, len(seeds))
+        self.assertEqual(summary.errors, [])
+        self.assertEqual(summary.claimed, 0)
+        self.assertEqual(summary.promoted, 0)
+        self.assertTrue(all(n == "upsert" for n, _ in store.calls))
+
     async def test_bounded_verification_and_recording(self):
         claim = [
             {"id": f"00000000-0000-4000-8000-00000000000{i}", "company_key": f"c{i}",
@@ -214,3 +260,4 @@ class WorkerTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

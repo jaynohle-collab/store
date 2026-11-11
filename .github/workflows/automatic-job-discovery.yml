@@ -72,6 +72,10 @@ jobs:
       GITHUB_MODELS_TOKEN: ${{ secrets.GITHUB_MODELS_TOKEN }}
       AUTO_DISCOVERY_PROVIDER_ORDER: ${{ vars.AUTO_DISCOVERY_PROVIDER_ORDER || '' }}
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      ANTHROPIC_MODEL: claude-haiku-5-5
+      # Independent opt-in, plus server-side daily/monthly guards. Key alone is inert.
+      HAIKU_PAID_EXECUTION_APPROVED: ${{ vars.HAIKU_PAID_EXECUTION_APPROVED || 'false' }}
       GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.6-flash' }}
       GROQ_MODEL: ${{ vars.GROQ_MODEL || '' }}
       # Free tiers only unless this repository variable is set to true (OpenAI is paid).
@@ -111,8 +115,9 @@ jobs:
           if [ -n "${GROQ_API_KEY}" ]; then llm_ok=1; fi
           if [ -n "${OTHER_FREE_LLM}" ]; then llm_ok=1; fi
           if [ -n "${OPENAI_API_KEY}" ]; then llm_ok=1; fi
+          if [ "${HAIKU_PAID_EXECUTION_APPROVED}" = "true" ] && [ -n "${ANTHROPIC_API_KEY}" ]; then llm_ok=1; fi
           if [ "$llm_ok" -eq 0 ]; then
-            echo "At least one of GEMINI_API_KEY / GROQ_API_KEY / OPENAI_API_KEY must be configured"
+            echo "At least one enabled LLM provider must be configured"
             missing=1
           fi
           # Never print secret values.

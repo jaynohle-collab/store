@@ -95,6 +95,10 @@ class QuotaExhaustedError(TransientProviderError):
     """Free-tier / billing quota exhausted for this provider."""
 
 
+class BudgetUnavailableError(QuotaExhaustedError):
+    """Paid budget denied/unavailable; bench the provider for this run."""
+
+
 class InvalidModelOutputError(ValueError):
     """Provider returned non-JSON or unusable content."""
 
@@ -586,7 +590,7 @@ FREE_OPENAI_COMPATIBLE: dict[str, tuple[type[OpenAICompatibleProvider], tuple[st
     "openrouter": (OpenRouterProvider, ("OPENROUTER_API_KEY",), "OPENROUTER_MODEL"),
 }
 DEFAULT_PROVIDER_ORDER = (
-    "gemini", "groq", "cerebras", "github_models", "mistral", "sambanova", "nvidia", "openrouter", "openai",
+    "anthropic", "gemini", "groq", "cerebras", "github_models", "mistral", "sambanova", "nvidia", "openrouter", "openai",
 )
 
 
@@ -633,7 +637,7 @@ class FallbackEvaluationProvider(EvaluationProvider):
                 return result
             except TransientProviderError as exc:
                 errors.append(f"{provider.name}:{exc}")
-                if isinstance(exc, ProviderAuthError):
+                if isinstance(exc, (ProviderAuthError, BudgetUnavailableError)):
                     self._benched.add(provider.name)
                 elif isinstance(exc, QuotaExhaustedError):
                     strikes = self._quota_strikes.get(provider.name, 0) + 1
@@ -671,11 +675,12 @@ def configured_providers(
     *,
     transport: httpx.BaseTransport | None = None,
 ) -> list[EvaluationProvider]:
-    """Return configured providers in default preference order (gemini → groq → openai).
+    """Return approved/configured providers in preference order.
 
     Free tiers only by default. OpenAI is paid, so it joins the chain only when
     ``AUTO_DISCOVERY_ALLOW_PAID_PROVIDERS`` is truthy or it is the explicit
-    ``AUTO_DISCOVERY_LLM_PROVIDER`` override.
+    ``AUTO_DISCOVERY_LLM_PROVIDER`` override. Haiku needs its independent
+    approval gate and a fresh durable budget claim for every HTTP attempt.
     """
     override = (os.environ.get("AUTO_DISCOVERY_LLM_PROVIDER") or "").strip().lower()
     allow_paid = (os.environ.get("AUTO_DISCOVERY_ALLOW_PAID_PROVIDERS") or "").strip().lower() in (
@@ -708,6 +713,23 @@ def configured_providers(
             transport=transport,
         )
 
+    # A distinct rollout gate and durable server claim are mandatory for Haiku.
+    # Neither an API key, generic paid flag nor explicit override bypasses them.
+    haiku_approved = os.environ.get("HAIKU_PAID_EXECUTION_APPROVED", "").strip().lower() == "true"
+    if haiku_approved or override in {"anthropic", "haiku"}:
+        from .anthropic import AnthropicHaikuProvider, HAIKU_MODEL
+
+        anthropic_key = (os.environ.get("ANTHROPIC_API_KEY") or "").strip()
+        if override in {"anthropic", "haiku"}:
+            override = "anthropic"
+            if not haiku_approved:
+                raise AdapterError("Haiku requires HAIKU_PAID_EXECUTION_APPROVED=true after budget review", category="validation")
+        if anthropic_key:
+            model = (os.environ.get("ANTHROPIC_MODEL") or HAIKU_MODEL).strip()
+            if model != HAIKU_MODEL:
+                raise AdapterError("ANTHROPIC_MODEL must match the reviewed Haiku budget policy", category="validation")
+            available["anthropic"] = AnthropicHaikuProvider(anthropic_key, model=model, transport=transport)
+
     if override:
         if override not in available:
             raise AdapterError(
@@ -735,7 +757,8 @@ def resolve_provider(
         raise AdapterError(
             "no LLM API key configured (GEMINI/GROQ/CEREBRAS/MISTRAL/SAMBANOVA/NVIDIA/OPENROUTER "
             "keys or GITHUB_MODELS_TOKEN; OPENAI_API_KEY "
-            "needs AUTO_DISCOVERY_ALLOW_PAID_PROVIDERS=true)",
+            "needs AUTO_DISCOVERY_ALLOW_PAID_PROVIDERS=true; ANTHROPIC_API_KEY "
+            "needs HAIKU_PAID_EXECUTION_APPROVED=true and reviewed server controls)",
             category="validation",
         )
     # Always wrap, so output validation and benching apply even with one provider.

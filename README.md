@@ -671,6 +671,10 @@ save_job → get_job → search_jobs → list_recent_jobs → delete_job
 
 ## Tests
 
+Guarded Anthropic Haiku evaluation and its manual workflow are documented in
+[Haiku evaluation integration](docs/haiku-evaluation.md). Paid usage is disabled
+by default pending review of the daily and monthly controls.
+
 ```bash
 # remote MCP
 cd remote_mcp && npm test

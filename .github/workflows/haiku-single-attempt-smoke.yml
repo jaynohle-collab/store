@@ -1,0 +1,108 @@
+name: Haiku Single Attempt Smoke
+
+# Temporary branch only. This tests live infrastructure with synthetic text,
+# not the discovery queue. The production schedule remains paused.
+on:
+  push:
+    branches: ['smoke/haiku-one-attempt-20261112']
+    paths: ['.github/workflows/haiku-single-attempt-smoke.yml']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: automatic-job-discovery
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    if: >-
+      github.run_attempt == 1 &&
+      github.event.head_commit.message == 'Run guarded Haiku smoke test once' &&
+      vars.HAIKU_PAID_EXECUTION_APPROVED == 'true' &&
+      vars.AUTO_DISCOVERY_PROVIDER_ORDER == 'anthropic' &&
+      vars.AUTO_DISCOVERY_SCHEDULE_ENABLED == 'false' &&
+      vars.AUTO_DISCOVERY_ALLOW_PAID_PROVIDERS != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the reviewed production implementation
+        uses: actions/checkout@v4
+        with:
+          ref: 6dfc0852aacbbd12b1290df1f5c2c3b64a232a53
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install existing dependencies without application secrets
+        run: python -m pip install -r requirements.txt
+      - name: Perform one guarded synthetic request
+        env:
+          JOB_MCP_URL: https://jay-job-mcp.vercel.app/api/mcp
+          AUTH0_TOKEN_URL: https://jay-job.us.auth0.com/oauth/token
+          AUTH0_AUDIENCE: https://jay-job-mcp-michaeltchueng-2909s-projects.vercel.app/api/mcp
+          AUTH0_SCOPES: jobs:worker
+          AUTH0_CLIENT_ID: ${{ secrets.AUTH0_CLIENT_ID }}
+          AUTH0_CLIENT_SECRET: ${{ secrets.AUTH0_CLIENT_SECRET }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          HAIKU_PAID_EXECUTION_APPROVED: ${{ vars.HAIKU_PAID_EXECUTION_APPROVED || 'false' }}
+        run: |
+          python - <<'PY'
+          import json
+          import logging
+          import os
+          import sys
+
+          from job_agent.auto_discovery.evaluate.anthropic import (
+              AnthropicHaikuProvider, HAIKU_MODEL, HAIKU_RESERVED_MICRO_USD,
+          )
+
+          # Do not print credentials, provider payloads, raw exceptions, or responses.
+          logging.disable(logging.CRITICAL)
+          required = ('AUTH0_CLIENT_ID', 'AUTH0_CLIENT_SECRET', 'ANTHROPIC_API_KEY')
+          if any(not os.environ.get(name) for name in required):
+              print('SMOKE_BLOCKED: required configuration missing')
+              sys.exit(1)
+          if os.environ.get('HAIKU_PAID_EXECUTION_APPROVED') != 'true':
+              print('SMOKE_BLOCKED: paid execution not approved')
+              sys.exit(1)
+          if HAIKU_MODEL != 'claude-haiku-5-5' or HAIKU_RESERVED_MICRO_USD != 5000:
+              print('SMOKE_BLOCKED: unexpected reviewed policy')
+              sys.exit(1)
+
+          try:
+              # Exactly one invocation. Normal durable reserve/claim and transport
+              # controls remain intact. No discovery, fallback, retry, or refund.
+              result = AnthropicHaikuProvider(os.environ['ANTHROPIC_API_KEY']).complete_json(
+                  system='Return the JSON object requested by this synthetic connectivity test.',
+                  user='Synthetic job: Example Company seeks a Python developer. Return {"status":"ok"}.',
+                  schema={
+                      'type': 'object',
+                      'properties': {'status': {'type': 'string', 'const': 'ok'}},
+                      'required': ['status'],
+                      'additionalProperties': False,
+                  },
+              )
+          except Exception as exc:
+              status = getattr(exc, 'status_code', None)
+              print(json.dumps({
+                  'smoke': 'failed',
+                  'error_type': type(exc).__name__,
+                  'http_status': status if isinstance(status, int) else None,
+                  'inference_retried': False,
+              }))
+              sys.exit(1)
+
+          if not isinstance(result, dict) or result.get('status') != 'ok':
+              print('SMOKE_FAILED: response validation failed; no retry')
+              sys.exit(1)
+          print(json.dumps({
+              'smoke': 'passed',
+              'requested_model': HAIKU_MODEL,
+              'reserved_micro_usd': HAIKU_RESERVED_MICRO_USD,
+              'provider_invocations': 1,
+              'inference_retried': False,
+              'synthetic_input_only': True,
+          }))
+          PY

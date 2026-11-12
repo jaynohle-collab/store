@@ -1,4 +1,5 @@
 import { registerKeywordReviewTools } from "./keyword_review_tools";
+import { registerBackendTargetTools } from "./backend_target_tools";
 import { registerBackendIdentityTools } from "./backend_identity_tools";
 import { registerHaikuBudgetTools } from "./haiku_budget_tools";
 import type { AuthInfo, McpServer } from "@modelcontextprotocol/server";
@@ -49,6 +50,7 @@ function errorResult(message: string) {
 
 export function registerJobTools(server: McpServer): void {
   registerBackendIdentityTools(server);
+  registerBackendTargetTools(server);
   registerKeywordReviewTools(server);
   registerHaikuBudgetTools(server);
   registerLifecycleTools(server);

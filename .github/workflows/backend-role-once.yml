@@ -1,0 +1,90 @@
+name: Read Backend Role Once
+
+# Temporary read-only diagnostic. Public logs receive encrypted output only.
+on:
+  push:
+    branches: ['diagnostics/backend-role-once-20261112']
+    paths: ['.github/workflows/backend-role-once.yml']
+permissions:
+  contents: read
+concurrency:
+  group: backend-role-diagnostic
+  cancel-in-progress: false
+jobs:
+  read-role:
+    if: github.run_attempt == 1 && github.event.head_commit.message == 'Read backend database role once'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: e5683098bcd998afaac4071e74ab8f080fb3a25b
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install existing dependencies without application secrets
+        run: python -m pip install -r requirements.txt
+      - name: Read role and encrypt the result
+        env:
+          JOB_MCP_URL: https://jay-job-mcp.vercel.app/api/mcp
+          AUTH0_TOKEN_URL: https://jay-job.us.auth0.com/oauth/token
+          AUTH0_AUDIENCE: https://jay-job-mcp-michaeltchueng-2909s-projects.vercel.app/api/mcp
+          AUTH0_SCOPES: jobs:worker
+          AUTH0_CLIENT_ID: ${{ secrets.AUTH0_CLIENT_ID }}
+          AUTH0_CLIENT_SECRET: ${{ secrets.AUTH0_CLIENT_SECRET }}
+        run: |
+          set +x
+          python - <<'PYCODE'
+          """One-time private result capture. Never print the plaintext role or exceptions."""
+          from __future__ import annotations
+          import asyncio, base64, contextlib, io, json, logging, os, subprocess, sys
+          from pathlib import Path
+
+          logging.disable(logging.CRITICAL)
+
+
+          def encrypt_result(result, public_key: Path) -> str:
+              if not isinstance(result, dict) or set(result) != {'ok', 'database_role'} or result.get('ok') is not True:
+                  raise ValueError('invalid diagnostic result')
+              role = result['database_role']
+              if not isinstance(role, str) or not role.strip() or len(role.encode('utf-8')) > 63 or any(ord(c) < 32 or ord(c) == 127 for c in role):
+                  raise ValueError('invalid role')
+              payload = json.dumps({'database_role': role}, ensure_ascii=True, separators=(',', ':')).encode()
+              process = subprocess.run(['openssl','pkeyutl','-encrypt','-pubin','-inkey',str(public_key),
+                  '-pkeyopt','rsa_padding_mode:oaep','-pkeyopt','rsa_oaep_md:sha256','-pkeyopt','rsa_mgf1_md:sha256'],
+                  input=payload, capture_output=True, timeout=10, check=True)
+              if len(process.stdout) != 512:
+                  raise ValueError('expected 4096-bit recipient')
+              return base64.b64encode(process.stdout).decode('ascii')
+
+
+          async def run(public_key: Path, client_factory=None) -> int:
+              try:
+                  # Keep dependency prints as well as logging out of public Actions logs.
+                  with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                      if os.environ.get('RUNNER_DEBUG') == '1' or os.environ.get('ACTIONS_STEP_DEBUG') == 'true':
+                          raise ValueError('runner debugging must be off')
+                      # Validate recipient before credentials are used or network clients made.
+                      encrypt_result({'ok': True, 'database_role': 'synthetic_validation'}, public_key)
+                      if client_factory is None:
+                          from job_agent.integrations.remote_mcp_client import RemoteMcpClient
+                          client_factory = RemoteMcpClient
+                      result = await client_factory().call_tool('get_backend_database_role', {})
+                      ciphertext = encrypt_result(result, public_key)
+              except Exception:
+                  print('BACKEND_ROLE_DIAGNOSTIC_FAILED')
+                  return 1
+              print('BACKEND_ROLE_CIPHERTEXT=' + ciphertext)
+              return 0
+
+
+
+          import tempfile
+          with tempfile.TemporaryDirectory(prefix='backend-role-recipient-') as folder:
+              public_key=Path(folder)/'recipient.pub'
+              public_key.write_text('-----BEGIN PUBLIC KEY-----\nMIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAyd3Rc54xIdguytpLi/4G\nV2SPNiC7NYj31D77EIO7F6zPAtBVDiCQT+nD2HFNkPI731W3dxVd8ZogP2lTmX3y\nxUb0JIsGH1tDoQlK72TPLSEB57nLEvMG53u2WW1uRJUX/G05DrOU+Ibqs89Shzx2\n2VTHEgUn+4X6UbBzJZ6gKQbVS5jSC3V/fVzSaKZHiL3DQ+id4ylrz2QpoHjJJTel\nquZ5OCL23GsHzIBsvbxLZ/AExz3tTPewttJIwNpfE9Y/Q8QToyDUAK5wRq6/mG38\nZhevsdcpIZOLg+KSPI13FMxahLFzOZTGr4kzbM/BtMxlVKSJCz9I9FZyTX77dY59\ntKKXfG5H19TyGvp7LpuUnseSomcr6t2uJRqJrW/ngLlhuErx59+7EfyWVo7Y+N6R\nnhtNUdrX+FuaJ0EfChZhwWg1J/3waMVfIpyLoEcpst1YbYs4Kfjdi7X0oRQ6Li4m\nlMGB2xrF4rstpnONZp9PdRpI9IenCp+BQYoKld134i1/TL4yRmhMEWFEVrdqkLqt\ne+xerjhqtTmlfeVBgFj/RaFp8eZOKml3LaqiJftDPOqbBDfnQfHCRCG0V/8g+p7O\nqKcQ/up/WpUI3niwp1ExY7TYXbU8Ib6WH37baEc32Mk0pBVb2CccNphQiIZA3ZzH\nOkvdmXvitSoYoLXb1P+vyE8CAwEAAQ==\n-----END PUBLIC KEY-----\n')
+              sys.exit(asyncio.run(run(public_key)))
+          PYCODE
+

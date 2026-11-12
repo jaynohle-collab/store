@@ -1,7 +1,8 @@
 name: Automatic Job Discovery
 
-# Producer workflow: claim due companies → ATS adapters → gpt-fit-v2 → submit
-# discovery batches, then hand off to the existing inbox processor in the same run.
+# Producer workflow supports a separate keyword-review lane without LLM calls.
+# Default remains gpt until an authorized rollout changes AUTO_DISCOVERY_MODE.
+# Keyword mode requires migration 019/server deployment and a private policy secret.
 #
 # Scheduled runs require repository variable:
 #   AUTO_DISCOVERY_SCHEDULE_ENABLED=true
@@ -9,6 +10,10 @@ name: Automatic Job Discovery
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: "gpt or keyword (blank = repository variable); keyword needs migration 019 + private policy"
+        required: false
+        default: ""
       max_companies:
         description: "Max companies to claim this run (blank = repository variable)"
         required: false
@@ -56,6 +61,9 @@ jobs:
     timeout-minutes: 60
     env:
       JOB_PERSISTENCE_MODE: remote
+      AUTO_DISCOVERY_MODE: ${{ github.event.inputs.mode || vars.AUTO_DISCOVERY_MODE || 'gpt' }}
+      KEYWORD_REVIEW_POLICY_JSON: ${{ secrets.KEYWORD_REVIEW_POLICY_JSON }}
+      KEYWORD_REVIEW_PROFILE_ID: ${{ vars.KEYWORD_REVIEW_PROFILE_ID || '' }}
       JOB_MCP_URL: https://jay-job-mcp.vercel.app/api/mcp
       AUTH0_TOKEN_URL: https://jay-job.us.auth0.com/oauth/token
       AUTH0_AUDIENCE: https://jay-job-mcp-michaeltchueng-2909s-projects.vercel.app/api/mcp
@@ -110,6 +118,13 @@ jobs:
           missing=0
           if [ -z "${AUTH0_CLIENT_ID}" ]; then echo "AUTH0_CLIENT_ID is not configured"; missing=1; fi
           if [ -z "${AUTH0_CLIENT_SECRET}" ]; then echo "AUTH0_CLIENT_SECRET is not configured"; missing=1; fi
+          if [ "${AUTO_DISCOVERY_MODE}" = "keyword" ]; then
+            if [ -z "${KEYWORD_REVIEW_POLICY_JSON}" ]; then echo "Private keyword policy is not configured"; missing=1; fi
+            if [ "$missing" -ne 0 ]; then exit 1; fi
+            echo "Auth0 and private keyword policy are present; no LLM is required (values not logged)"
+            exit 0
+          fi
+          if [ "${AUTO_DISCOVERY_MODE}" != "gpt" ]; then echo "Invalid discovery mode"; exit 1; fi
           llm_ok=0
           if [ -n "${GEMINI_API_KEY}" ]; then llm_ok=1; fi
           if [ -n "${GROQ_API_KEY}" ]; then llm_ok=1; fi
@@ -157,7 +172,7 @@ jobs:
 
       - name: Process pending discovery inbox batches
         # Still drain the inbox when the producer failed on an LLM outage.
-        if: ${{ !cancelled() && github.event.inputs.skip_inbox_handoff != 'true' }}
+        if: ${{ !cancelled() && env.AUTO_DISCOVERY_MODE == 'gpt' && github.event.inputs.skip_inbox_handoff != 'true' }}
         run: |
           set -euo pipefail
           LIMIT="${DISCOVERY_INBOX_BATCH_LIMIT}"

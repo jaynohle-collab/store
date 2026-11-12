@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import json
 import os
 import sys
 from pathlib import Path
@@ -32,6 +33,10 @@ def load_repo_dotenv() -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Automatic ATS discovery producer")
     parser.add_argument("--max-companies", type=int, default=None)
+    parser.add_argument("--mode", choices=("gpt", "keyword"), default=None,
+                        help="Keyword mode writes unverified review candidates without LLM or inbox handoff")
+    parser.add_argument("--keyword-policy", type=Path, default=None,
+                        help="Private keyword policy JSON file; alternatively set KEYWORD_REVIEW_POLICY_JSON")
     parser.add_argument(
         "--process-inbox",
         action="store_true",
@@ -45,7 +50,49 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def load_keyword_policy(path: Path | None = None):
+    from job_agent.review.keyword import KeywordPolicy
+    try:
+        if path is not None:
+            if path.stat().st_size > 1_000_000:
+                raise ValueError("policy too large")
+            raw = path.read_text(encoding="utf-8-sig")
+        else:
+            raw = os.environ.get("KEYWORD_REVIEW_POLICY_JSON", "")
+        if not raw or len(raw) > 1_000_000:
+            raise ValueError("missing or oversized policy")
+        return KeywordPolicy.from_dict(json.loads(raw))
+    except (OSError, ValueError, TypeError):
+        # Secret policy values and group names must not appear in public CI logs.
+        raise ValueError("A valid private keyword policy file or KEYWORD_REVIEW_POLICY_JSON is required") from None
+
+
 async def run_async(args: argparse.Namespace) -> int:
+    mode = getattr(args, "mode", None) or os.environ.get("AUTO_DISCOVERY_MODE", "gpt")
+    if mode not in {"gpt", "keyword"}:
+        logger.error("AUTO_DISCOVERY_MODE must be gpt or keyword; no fallback executed")
+        return 2
+    if mode == "keyword":
+        # Validate the private policy before constructing any network client.
+        try:
+            policy = load_keyword_policy(getattr(args, "keyword_policy", None))
+        except ValueError as exc:
+            logger.error("%s", exc)
+            return 2
+        from job_agent.review.pipeline import KeywordDiscoveryPipeline
+        from job_agent.profile.identity import identity_of, load_active_profile
+        profile_id = os.environ.get("KEYWORD_REVIEW_PROFILE_ID", "").strip() or identity_of(load_active_profile()).profile_id
+        pipeline = KeywordDiscoveryPipeline(
+            RemoteLifecycleStore(), policy=policy, profile_id=profile_id,
+            max_companies=args.max_companies,
+            worker_identity=os.environ.get("AUTO_DISCOVERY_WORKER_IDENTITY", "keyword-discovery"))
+        metrics = await pipeline.run()
+        logger.info("Keyword discovery: listed=%s saved=%s new_to_review=%s seen_before=%s failed_companies=%s llm_calls=0",
+                    metrics.candidates_listed, metrics.review_saved, metrics.review_new,
+                    metrics.review_updated, metrics.companies_failed)
+        # Never process legacy inbox/pending AI work in keyword mode, even when
+        # --process-inbox or AUTO_DISCOVERY_PROCESS_INBOX were enabled earlier.
+        return 1 if metrics.errors else 0
     store = RemoteLifecycleStore()
     pipeline = AutomaticDiscoveryPipeline(
         store,

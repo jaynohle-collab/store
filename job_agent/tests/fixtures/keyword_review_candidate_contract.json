@@ -1,0 +1,248 @@
+{
+  "rows": [
+    {
+      "title": "Senior Software Engineer",
+      "company": "Example Company",
+      "source": "greenhouse",
+      "external_job_id": "42",
+      "url": "https://boards.example.com/example/jobs/42",
+      "location": "United States - Remote",
+      "description": "Build distributed systems."
+    },
+    {
+      "title": "Staff AI Engineer",
+      "company": "Example Company",
+      "source": "greenhouse",
+      "external_job_id": "43",
+      "url": "https://example.com/careers#/jobs/43",
+      "location": "Remote",
+      "description": "Build distributed systems."
+    },
+    {
+      "title": "Junior Engineer",
+      "company": "Example Company",
+      "source": "greenhouse",
+      "external_job_id": "44",
+      "url": "https://example.com/jobs/44",
+      "location": "United States - Remote",
+      "description": "Build distributed systems."
+    }
+  ],
+  "policy": {
+    "policy_version": "fixture-v1",
+    "role_terms": [
+      "engineer",
+      "fde"
+    ],
+    "seniority_terms": [
+      "lead",
+      "principal",
+      "senior",
+      "staff"
+    ],
+    "excluded_title_terms": [
+      "intern",
+      "junior"
+    ],
+    "countries": [
+      "us"
+    ],
+    "work_modes": [
+      "hybrid",
+      "remote"
+    ],
+    "minimum_score": 20,
+    "stronger_score": 50,
+    "keyword_groups": {
+      "AI": [
+        "ai",
+        "artificial intelligence"
+      ],
+      "language models": [
+        "large language models",
+        "llm"
+      ],
+      "systems": [
+        "distributed system",
+        "distributed systems"
+      ]
+    }
+  },
+  "request": {
+    "profile_id": "fixture",
+    "policy_version": "fixture-v1",
+    "policy_fingerprint": "70f3f4a0be83b47ec839b0b04352807b515f2d6932b262d5ffdc4e39c4cf2696",
+    "run_id": "7c8f64a1-f7f7-4398-bd3e-3bba4e699603",
+    "candidates": [
+      {
+        "candidate_key": "89ec81a0c167a98c09d214fa194d08c87f237a65ccbe56dddc38fb9ed85b54bc",
+        "title": "Senior Software Engineer",
+        "company": "Example Company",
+        "source": "greenhouse",
+        "external_job_id": "42",
+        "normalized_url": "https://boards.example.com/example/jobs/42",
+        "identity_aliases": [
+          {
+            "normalized_url": "https://boards.example.com/example/jobs/42",
+            "source": "greenhouse",
+            "company": "Example Company",
+            "external_job_id": "42"
+          }
+        ],
+        "url": "https://boards.example.com/example/jobs/42",
+        "location_text": "United States - Remote",
+        "posted_date_text": "",
+        "label": "Keyword match, unverified",
+        "bucket": "stronger",
+        "keyword_score": 75,
+        "score_components": {
+          "role_title": 40,
+          "keyword_groups": 5,
+          "seniority_title": 10,
+          "listing_country": 10,
+          "listing_work_mode": 10
+        },
+        "matched_role_terms": [
+          "engineer"
+        ],
+        "matched_seniority_terms": [
+          "senior"
+        ],
+        "matched_keyword_groups": [
+          {
+            "group": "systems",
+            "aliases": [
+              "distributed systems"
+            ]
+          }
+        ],
+        "listing_country_signal": "us",
+        "listing_work_mode_signal": "remote",
+        "eligibility_status": "unverified",
+        "open_status": "unverified",
+        "link_status": "unverified",
+        "application_action": "none",
+        "application_history": "not_checked",
+        "duplicate_count": 0,
+        "warnings": [],
+        "filter_reasons": []
+      },
+      {
+        "candidate_key": "19e04ecccabe5e04f8484c18360297a30d009dcb7ca8934739053cec11480a3b",
+        "title": "Staff AI Engineer",
+        "company": "Example Company",
+        "source": "greenhouse",
+        "external_job_id": "43",
+        "normalized_url": "https://example.com/careers#/jobs/43",
+        "identity_aliases": [
+          {
+            "normalized_url": "https://example.com/careers#/jobs/43",
+            "source": "greenhouse",
+            "company": "Example Company",
+            "external_job_id": "43"
+          }
+        ],
+        "url": "https://example.com/careers#/jobs/43",
+        "location_text": "Remote",
+        "posted_date_text": "",
+        "label": "Keyword match, unverified",
+        "bucket": "needs_checking",
+        "keyword_score": 70,
+        "score_components": {
+          "role_title": 40,
+          "keyword_groups": 10,
+          "seniority_title": 10,
+          "listing_country": 0,
+          "listing_work_mode": 10
+        },
+        "matched_role_terms": [
+          "engineer"
+        ],
+        "matched_seniority_terms": [
+          "staff"
+        ],
+        "matched_keyword_groups": [
+          {
+            "group": "AI",
+            "aliases": [
+              "ai"
+            ]
+          },
+          {
+            "group": "systems",
+            "aliases": [
+              "distributed systems"
+            ]
+          }
+        ],
+        "listing_country_signal": "unknown",
+        "listing_work_mode_signal": "remote",
+        "eligibility_status": "unverified",
+        "open_status": "unverified",
+        "link_status": "unverified",
+        "application_action": "none",
+        "application_history": "not_checked",
+        "duplicate_count": 0,
+        "warnings": [
+          "country_needs_checking"
+        ],
+        "filter_reasons": []
+      },
+      {
+        "candidate_key": "e3703694aa38ba7d2c46436e0a8644c235096a2d865f0fdbe6ca7e69b53b1187",
+        "title": "Junior Engineer",
+        "company": "Example Company",
+        "source": "greenhouse",
+        "external_job_id": "44",
+        "normalized_url": "https://example.com/jobs/44",
+        "identity_aliases": [
+          {
+            "normalized_url": "https://example.com/jobs/44",
+            "source": "greenhouse",
+            "company": "Example Company",
+            "external_job_id": "44"
+          }
+        ],
+        "url": "https://example.com/jobs/44",
+        "location_text": "United States - Remote",
+        "posted_date_text": "",
+        "label": "Keyword match, unverified",
+        "bucket": "filtered",
+        "keyword_score": 65,
+        "score_components": {
+          "role_title": 40,
+          "keyword_groups": 5,
+          "seniority_title": 0,
+          "listing_country": 10,
+          "listing_work_mode": 10
+        },
+        "matched_role_terms": [
+          "engineer"
+        ],
+        "matched_seniority_terms": [],
+        "matched_keyword_groups": [
+          {
+            "group": "systems",
+            "aliases": [
+              "distributed systems"
+            ]
+          }
+        ],
+        "listing_country_signal": "us",
+        "listing_work_mode_signal": "remote",
+        "eligibility_status": "unverified",
+        "open_status": "unverified",
+        "link_status": "unverified",
+        "application_action": "none",
+        "application_history": "not_checked",
+        "duplicate_count": 0,
+        "warnings": [
+          "seniority_needs_checking"
+        ],
+        "filter_reasons": [
+          "excluded_title_term"
+        ]
+      }
+    ]
+  }
+}

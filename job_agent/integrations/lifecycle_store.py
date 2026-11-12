@@ -404,3 +404,10 @@ class RemoteLifecycleStore:
     ) -> dict[str, Any]:
         result = await self._call("complete_pending_discovery_evaluation", payload)
         return dict(result or {})
+
+    async def upsert_keyword_review_candidates(
+        self, payload: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Store unverified keyword snapshots; never creates applications or GPT evidence."""
+        result = await self._call("upsert_keyword_review_candidates", payload)
+        return dict(result or {})

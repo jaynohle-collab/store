@@ -3,6 +3,8 @@ name: Automatic Job Discovery
 # Producer workflow supports a separate keyword-review lane without LLM calls.
 # Default remains gpt until an authorized rollout changes AUTO_DISCOVERY_MODE.
 # Keyword mode requires migration 019/server deployment and a private policy secret.
+# Initial keyword rollout is manual-only and requires a separate explicit opt-in.
+# Repository mode variables alone cannot activate keyword collection.
 #
 # Scheduled runs require repository variable:
 #   AUTO_DISCOVERY_SCHEDULE_ENABLED=true
@@ -14,6 +16,11 @@ on:
         description: "gpt or keyword (blank = repository variable); keyword needs migration 019 + private policy"
         required: false
         default: ""
+      activate_keyword_review:
+        description: "Explicitly allow this manual keyword canary only after migration, server opt-in and private policy setup"
+        type: boolean
+        required: false
+        default: false
       max_companies:
         description: "Max companies to claim this run (blank = repository variable)"
         required: false
@@ -62,6 +69,9 @@ jobs:
     env:
       JOB_PERSISTENCE_MODE: remote
       AUTO_DISCOVERY_MODE: ${{ github.event.inputs.mode || vars.AUTO_DISCOVERY_MODE || 'gpt' }}
+      # Do not source this guard from repository variables. Scheduled runs are
+      # deliberately blocked in keyword mode until a separate rollout change.
+      KEYWORD_REVIEW_ACTIVATION_APPROVED: ${{ github.event_name == 'workflow_dispatch' && inputs.activate_keyword_review == true && 'true' || 'false' }}
       KEYWORD_REVIEW_POLICY_JSON: ${{ secrets.KEYWORD_REVIEW_POLICY_JSON }}
       KEYWORD_REVIEW_PROFILE_ID: ${{ vars.KEYWORD_REVIEW_PROFILE_ID || '' }}
       JOB_MCP_URL: https://jay-job-mcp.vercel.app/api/mcp
@@ -115,6 +125,10 @@ jobs:
           OTHER_FREE_LLM: ${{ secrets.CEREBRAS_API_KEY }}${{ secrets.MISTRAL_API_KEY }}${{ secrets.SAMBANOVA_API_KEY }}${{ secrets.NVIDIA_API_KEY }}${{ secrets.OPENROUTER_API_KEY }}${{ github.token }}
         run: |
           set -euo pipefail
+          if [ "${AUTO_DISCOVERY_MODE}" = "keyword" ] && [ "${KEYWORD_REVIEW_ACTIVATION_APPROVED}" != "true" ]; then
+            echo "Keyword review is disabled; an explicitly approved manual canary is required"
+            exit 1
+          fi
           missing=0
           if [ -z "${AUTH0_CLIENT_ID}" ]; then echo "AUTH0_CLIENT_ID is not configured"; missing=1; fi
           if [ -z "${AUTH0_CLIENT_SECRET}" ]; then echo "AUTH0_CLIENT_SECRET is not configured"; missing=1; fi

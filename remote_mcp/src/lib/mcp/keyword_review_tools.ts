@@ -12,6 +12,9 @@ export function registerKeywordReviewTools(server: McpServer): void {
   }, async (args, extra) => {
     try {
       assertToolPermission(extra.http?.authInfo, "upsert_keyword_review_candidates");
+      if (process.env.KEYWORD_REVIEW_ACTIVATION_APPROVED !== "true") {
+        throw new Error("Keyword review writes are disabled until activation is explicitly approved.");
+      }
       const result = { ok: true, ...await upsertKeywordReviewCandidates(args) };
       return { content: [{ type: "text" as const, text: JSON.stringify(result) }], structuredContent: result };
     } catch (error) {

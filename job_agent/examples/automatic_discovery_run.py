@@ -73,6 +73,11 @@ async def run_async(args: argparse.Namespace) -> int:
         logger.error("AUTO_DISCOVERY_MODE must be gpt or keyword; no fallback executed")
         return 2
     if mode == "keyword":
+        # Mode selection alone must never activate live collection. Accept only
+        # the explicit opt-in, before policy/profile reads or client creation.
+        if os.environ.get("KEYWORD_REVIEW_ACTIVATION_APPROVED") != "true":
+            logger.error("Keyword review is disabled; explicit activation approval is required")
+            return 2
         # Validate the private policy before constructing any network client.
         try:
             policy = load_keyword_policy(getattr(args, "keyword_policy", None))

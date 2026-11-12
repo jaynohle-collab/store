@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+from pathlib import Path
+import re
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -248,6 +252,7 @@ class KeywordPipelineTests(unittest.IsolatedAsyncioTestCase):
             async def run(self):
                 return fake_metrics
         with patch.dict("os.environ", {"KEYWORD_REVIEW_POLICY_JSON": json.dumps({"policy_version": "test", "role_terms": ["engineer"]}),
+                                      "KEYWORD_REVIEW_ACTIVATION_APPROVED": "true",
                                       "AUTO_DISCOVERY_PROCESS_INBOX": "true", "KEYWORD_REVIEW_PROFILE_ID": "fixture"}), \
              patch("job_agent.examples.automatic_discovery_run.RemoteLifecycleStore", return_value=Store()), \
              patch("job_agent.review.pipeline.KeywordDiscoveryPipeline", FakePipeline), \
@@ -257,9 +262,24 @@ class KeywordPipelineTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_policy_stops_before_network_client(self):
         args = argparse.Namespace(mode="keyword", keyword_policy=None, max_companies=1)
-        with patch.dict("os.environ", {"KEYWORD_REVIEW_POLICY_JSON": ""}), \
+        with patch.dict("os.environ", {"KEYWORD_REVIEW_POLICY_JSON": "", "KEYWORD_REVIEW_ACTIVATION_APPROVED": "true"}), \
              patch("job_agent.examples.automatic_discovery_run.RemoteLifecycleStore", side_effect=AssertionError("network client forbidden")):
             self.assertEqual(await run_async(args), 2)
+
+    async def test_keyword_mode_requires_separate_exact_opt_in_before_any_work(self):
+        args = argparse.Namespace(mode=None, keyword_policy=None, max_companies=1,
+                                  process_inbox=True, skip_inbox_handoff=False)
+        for approval in (None, "", "false", "1", "yes", "TRUE", " true", "true "):
+            with self.subTest(approval=approval), patch.dict("os.environ", {"AUTO_DISCOVERY_MODE": "keyword"}):
+                if approval is None:
+                    os.environ.pop("KEYWORD_REVIEW_ACTIVATION_APPROVED", None)
+                else:
+                    os.environ["KEYWORD_REVIEW_ACTIVATION_APPROVED"] = approval
+                with patch("job_agent.examples.automatic_discovery_run.load_keyword_policy", side_effect=AssertionError("policy read forbidden")), \
+                     patch("job_agent.examples.automatic_discovery_run.RemoteLifecycleStore", side_effect=AssertionError("client forbidden")), \
+                     patch("job_agent.examples.automatic_discovery_run.AutomaticDiscoveryPipeline", side_effect=AssertionError("GPT fallback forbidden")), \
+                     patch("job_agent.examples.process_discovery_inbox.main", side_effect=AssertionError("inbox forbidden")):
+                    self.assertEqual(await run_async(args), 2)
 
     async def test_store_routes_only_to_new_tool(self):
         class Client:
@@ -281,6 +301,31 @@ class KeywordPolicyLoadingTests(unittest.TestCase):
             with self.assertRaises(ValueError) as caught:
                 load_keyword_policy()
             self.assertNotIn("privategroup", str(caught.exception))
+
+
+class KeywordWorkflowActivationTests(unittest.TestCase):
+    def test_manual_only_gate_precedes_source_expansion_and_does_not_fallback(self):
+        workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/automatic-job-discovery.yml").read_text()
+        binding = "KEYWORD_REVIEW_ACTIVATION_APPROVED: ${{ github.event_name == 'workflow_dispatch' && inputs.activate_keyword_review == true && 'true' || 'false' }}"
+        self.assertIn(binding, workflow)
+        self.assertRegex(workflow, r"activate_keyword_review:\n(?:[^\n]*\n){1,4}\s+default: false")
+        self.assertNotIn("vars.KEYWORD_REVIEW_ACTIVATION_APPROVED", workflow)
+        self.assertIn("env.AUTO_DISCOVERY_MODE == 'gpt'", workflow)
+        verify = workflow.split("      - name: Verify required secrets are present\n", 1)[1]
+        script = verify.split("        run: |\n", 1)[1].split("\n      - name:", 1)[0]
+        script = re.sub(r"^          ", "", script, flags=re.MULTILINE)
+        self.assertLess(workflow.index("explicitly approved manual canary"), workflow.index("- name: Expand and verify discovery companies"))
+        for approval in ("", "false", "1", "yes", "TRUE", " true", "true ", "true"):
+            with self.subTest(approval=approval):
+                result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env={
+                    "PATH": os.environ.get("PATH", ""), "AUTO_DISCOVERY_MODE": "keyword",
+                    "KEYWORD_REVIEW_ACTIVATION_APPROVED": approval,
+                    "AUTH0_CLIENT_ID": "fixture", "AUTH0_CLIENT_SECRET": "fixture",
+                    "KEYWORD_REVIEW_POLICY_JSON": "fixture",
+                }, timeout=5)
+                self.assertEqual(result.returncode, 0 if approval == "true" else 1)
+                if approval != "true":
+                    self.assertIn("Keyword review is disabled", result.stdout)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,40 @@
+name: Compare Backend Target Once
+
+# Temporary read-only check. No database connection or mutation.
+on:
+  push:
+    branches: ['diagnostics/backend-target-once-20261112']
+    paths: ['.github/workflows/backend-target-once.yml']
+permissions:
+  contents: read
+concurrency:
+  group: apply-migration
+  cancel-in-progress: false
+jobs:
+  compare-target:
+    if: github.run_attempt == 1 && github.event.head_commit.message == 'Compare backend database target once'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: af449fbe4d6ddae8e0d6f9970d6d09520f146e2a
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install existing dependencies without application secrets
+        run: python -m pip install -r requirements.txt
+      - name: Compare privately and emit only a boolean
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          JOB_MCP_URL: https://jay-job-mcp.vercel.app/api/mcp
+          AUTH0_TOKEN_URL: https://jay-job.us.auth0.com/oauth/token
+          AUTH0_AUDIENCE: https://jay-job-mcp-michaeltchueng-2909s-projects.vercel.app/api/mcp
+          AUTH0_SCOPES: jobs:worker
+          AUTH0_CLIENT_ID: ${{ secrets.AUTH0_CLIENT_ID }}
+          AUTH0_CLIENT_SECRET: ${{ secrets.AUTH0_CLIENT_SECRET }}
+        run: |
+          set +x
+          python -m job_agent.examples.check_backend_database_target

@@ -18,6 +18,7 @@ export type JobScope = (typeof SCOPES)[keyof typeof SCOPES];
 
 export const TOOL_PERMISSIONS: Record<string, JobScope> = {
   get_backend_database_role: SCOPES.WORKER,
+  compare_backend_database_target: SCOPES.WORKER,
   upsert_keyword_review_candidates: "jobs:write",
   reserve_haiku_attempt: SCOPES.WORKER,
   claim_haiku_attempt: SCOPES.WORKER,

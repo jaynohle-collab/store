@@ -1,0 +1,171 @@
+name: Run Upgraded Discovery Once
+
+# Temporary explicit user-requested run. No schedule is added here.
+on:
+  push:
+    branches: ['ops/haiku-pipeline-once-20261112']
+    paths: ['.github/workflows/haiku-pipeline-once.yml']
+
+permissions:
+  contents: read
+  # GitHub Models free tier via the built-in token (no extra secret needed).
+  models: read
+
+concurrency:
+  group: automatic-job-discovery
+  cancel-in-progress: false
+
+jobs:
+  automatic-discovery:
+    if: >-
+      github.run_attempt == 1 &&
+      github.event.head_commit.message == 'Run upgraded discovery pipeline once' &&
+      vars.HAIKU_PAID_EXECUTION_APPROVED == 'true' &&
+      vars.AUTO_DISCOVERY_PROVIDER_ORDER == 'anthropic' &&
+      vars.AUTO_DISCOVERY_SCHEDULE_ENABLED == 'true' &&
+      (vars.AUTO_DISCOVERY_ALLOW_PAID_PROVIDERS == 'false' || vars.AUTO_DISCOVERY_ALLOW_PAID_PROVIDERS == '')
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      AUTO_DISCOVERY_SCHEDULE_ENABLED: ${{ vars.AUTO_DISCOVERY_SCHEDULE_ENABLED || 'false' }}
+      JOB_PERSISTENCE_MODE: remote
+      JOB_MCP_URL: https://jay-job-mcp.vercel.app/api/mcp
+      AUTH0_TOKEN_URL: https://jay-job.us.auth0.com/oauth/token
+      AUTH0_AUDIENCE: https://jay-job-mcp-michaeltchueng-2909s-projects.vercel.app/api/mcp
+      AUTH0_SCOPES: jobs:read jobs:write jobs:worker
+      AUTH0_CLIENT_ID: ${{ secrets.AUTH0_CLIENT_ID }}
+      AUTH0_CLIENT_SECRET: ${{ secrets.AUTH0_CLIENT_SECRET }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+      MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
+      SAMBANOVA_API_KEY: ${{ secrets.SAMBANOVA_API_KEY }}
+      NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      GITHUB_MODELS_TOKEN: ${{ secrets.GITHUB_MODELS_TOKEN }}
+      AUTO_DISCOVERY_PROVIDER_ORDER: ${{ vars.AUTO_DISCOVERY_PROVIDER_ORDER || '' }}
+      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      ANTHROPIC_MODEL: claude-haiku-5-5
+      # Independent opt-in, plus server-side daily/monthly guards. Key alone is inert.
+      HAIKU_PAID_EXECUTION_APPROVED: ${{ vars.HAIKU_PAID_EXECUTION_APPROVED || 'false' }}
+      GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.6-flash' }}
+      GROQ_MODEL: ${{ vars.GROQ_MODEL || '' }}
+      # Free tiers only unless this repository variable is set to true (OpenAI is paid).
+      AUTO_DISCOVERY_ALLOW_PAID_PROVIDERS: ${{ vars.AUTO_DISCOVERY_ALLOW_PAID_PROVIDERS || 'false' }}
+      AUTO_DISCOVERY_WORKER_IDENTITY: github-actions
+      # New per-run limit names win; legacy repository variables remain honored.
+      AUTO_DISCOVERY_MAX_COMPANIES_PER_RUN: ${{ github.event.inputs.max_companies || vars.AUTO_DISCOVERY_MAX_COMPANIES_PER_RUN || vars.AUTO_DISCOVERY_MAX_COMPANIES || '5' }}
+      AUTO_DISCOVERY_MAX_LISTINGS_PER_COMPANY: ${{ vars.AUTO_DISCOVERY_MAX_LISTINGS_PER_COMPANY || vars.AUTO_DISCOVERY_MAX_CANDIDATES_PER_COMPANY || '100' }}
+      AUTO_DISCOVERY_TOP_CANDIDATES_PER_COMPANY: ${{ github.event.inputs.top_candidates || vars.AUTO_DISCOVERY_TOP_CANDIDATES_PER_COMPANY || '5' }}
+      AUTO_DISCOVERY_MAX_EVALS_PER_RUN: ${{ github.event.inputs.max_evals || vars.AUTO_DISCOVERY_MAX_EVALS_PER_RUN || '15' }}
+      AUTO_DISCOVERY_MAX_BATCHES_PER_RUN: ${{ vars.AUTO_DISCOVERY_MAX_BATCHES_PER_RUN || '3' }}
+      AUTO_DISCOVERY_MAX_JOBS_PER_BATCH: ${{ vars.AUTO_DISCOVERY_MAX_JOBS_PER_BATCH || '5' }}
+      AUTO_DISCOVERY_MIN_RANK_SCORE: ${{ vars.AUTO_DISCOVERY_MIN_RANK_SCORE || '20' }}
+      AUTO_DISCOVERY_MAX_VERIFICATIONS_PER_RUN: ${{ vars.AUTO_DISCOVERY_MAX_VERIFICATIONS_PER_RUN || '5' }}
+      DISCOVERY_INBOX_WORKER_IDENTITY: github-actions
+      DISCOVERY_INBOX_BATCH_LIMIT: ${{ vars.DISCOVERY_INBOX_BATCH_LIMIT || '5' }}
+      DISCOVERY_INBOX_STALE_PROCESSING_MINUTES: ${{ vars.DISCOVERY_INBOX_STALE_PROCESSING_MINUTES || '60' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: 6dfc0852aacbbd12b1290df1f5c2c3b64a232a53
+          persist-credentials: false
+
+      - name: Verify required secrets are present
+        env:
+          AUTH0_CLIENT_ID: ${{ secrets.AUTH0_CLIENT_ID }}
+          AUTH0_CLIENT_SECRET: ${{ secrets.AUTH0_CLIENT_SECRET }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OTHER_FREE_LLM: ${{ secrets.CEREBRAS_API_KEY }}${{ secrets.MISTRAL_API_KEY }}${{ secrets.SAMBANOVA_API_KEY }}${{ secrets.NVIDIA_API_KEY }}${{ secrets.OPENROUTER_API_KEY }}${{ github.token }}
+        run: |
+          set -euo pipefail
+          missing=0
+          if [ -z "${AUTH0_CLIENT_ID}" ]; then echo "AUTH0_CLIENT_ID is not configured"; missing=1; fi
+          if [ -z "${AUTH0_CLIENT_SECRET}" ]; then echo "AUTH0_CLIENT_SECRET is not configured"; missing=1; fi
+          llm_ok=0
+          if [ -n "${GEMINI_API_KEY}" ]; then llm_ok=1; fi
+          if [ -n "${GROQ_API_KEY}" ]; then llm_ok=1; fi
+          if [ -n "${OTHER_FREE_LLM}" ]; then llm_ok=1; fi
+          if [ -n "${OPENAI_API_KEY}" ]; then llm_ok=1; fi
+          if [ "${HAIKU_PAID_EXECUTION_APPROVED}" = "true" ] && [ -n "${ANTHROPIC_API_KEY}" ]; then llm_ok=1; fi
+          if [ "$llm_ok" -eq 0 ]; then
+            echo "At least one enabled LLM provider must be configured"
+            missing=1
+          fi
+          # Never print secret values.
+          if [ "$missing" -ne 0 ]; then exit 1; fi
+          echo "Required Auth0 M2M and LLM secrets are present (values not logged)"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Expand and verify discovery companies
+        # Seed catalog + history-derived official ATS URLs only; bounded verification.
+        # Expansion problems never block the producer or inbox processing.
+        if: ${{ github.event.inputs.skip_expansion != 'true' && vars.AUTO_DISCOVERY_EXPANSION_ENABLED != 'false' }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          python -m job_agent.examples.expand_discovery_companies \
+            --max-verifications "${AUTO_DISCOVERY_MAX_VERIFICATIONS_PER_RUN}"
+
+      - name: Run automatic discovery producer
+        run: |
+          set -euo pipefail
+          MAX="${AUTO_DISCOVERY_MAX_COMPANIES_PER_RUN}"
+          echo "Claiming up to ${MAX} due discovery company(ies)"
+          # Secrets and Neon connection strings are never echoed.
+          python -m job_agent.examples.automatic_discovery_run \
+            --max-companies "${MAX}" \
+            --skip-inbox-handoff
+
+      - name: Process pending discovery inbox batches
+        # Still drain the inbox when the producer failed on an LLM outage.
+        if: ${{ !cancelled() && github.event.inputs.skip_inbox_handoff != 'true' }}
+        run: |
+          set -euo pipefail
+          LIMIT="${DISCOVERY_INBOX_BATCH_LIMIT}"
+          echo "Processing up to ${LIMIT} pending discovery inbox batch(es)"
+          python -m job_agent.examples.process_discovery_inbox \
+            --limit "${LIMIT}" \
+            --recover-stale \
+            --fail-on-batch-failure
+
+      - name: Read numeric production run metrics
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: |
+          python - <<'PYCODE'
+          import asyncio
+          import json
+          import logging
+          from job_agent.integrations.lifecycle_store import RemoteLifecycleStore
+          logging.disable(logging.CRITICAL)
+          async def report():
+              status = await RemoteLifecycleStore().get_automatic_discovery_status()
+              rows = []
+              for run in status.get('latest_runs', []):
+                  metrics = run.get('metrics') or {}
+                  numeric = {key: value for key, value in metrics.items()
+                             if isinstance(value, (int, float, bool))}
+                  rows.append({key: run.get(key) for key in
+                               ('id', 'started_at', 'completed_at', 'status', 'llm_provider')}
+                              | {'metrics': numeric})
+              print('PRODUCTION_NUMERIC_METRICS=' + json.dumps(rows))
+          try:
+              asyncio.run(report())
+          except Exception as exc:
+              print('METRICS_READ_UNAVAILABLE=' + type(exc).__name__)
+          PYCODE

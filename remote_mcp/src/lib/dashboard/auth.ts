@@ -83,6 +83,7 @@ export function isDashboardProtectedPath(pathname: string): boolean {
     pathname.startsWith("/api/dashboard") ||
     pathname.startsWith("/api/jobs") ||
     pathname.startsWith("/api/applications") ||
+    pathname.startsWith("/api/keyword-review") ||
     pathname.startsWith("/api/discovery-runs")
   );
 }

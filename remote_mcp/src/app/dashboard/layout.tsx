@@ -4,6 +4,7 @@ import { getDashboardSessionUser } from "@/lib/dashboard/auth";
 
 const NAV = [
   { href: "/dashboard", label: "Overview" },
+  { href: "/dashboard/keyword-review", label: "Keyword matches" },
   { href: "/dashboard/to-apply", label: "To Apply" },
   { href: "/dashboard/jobs", label: "All Jobs" },
   { href: "/dashboard/applied", label: "Applied" },

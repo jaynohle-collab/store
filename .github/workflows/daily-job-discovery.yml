@@ -1,13 +1,9 @@
 name: Daily Job Discovery
 
-# Manual production testing: Actions → Daily Job Discovery → Run workflow
-# Scheduled run: ~8:00 AM Pacific. GitHub cron is UTC; DST shifts the local hour.
-#   Pacific Daylight Time (UTC-7): 15:00 UTC ≈ 8:00 AM PDT
-#   Pacific Standard Time (UTC-8): 15:00 UTC ≈ 7:00 AM PST
+# Manual-only legacy AI discovery. Scheduled collection uses the keyword lane.
+# Kept for deliberate operator testing; no automatic model calls.
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "0 15 * * *"
 
 permissions:
   contents: read
@@ -18,11 +14,7 @@ concurrency:
 
 jobs:
   discover-and-persist:
-    # Manual workflow_dispatch always runs.
-    # Scheduled runs require repository variable JOB_DISCOVERY_SCHEDULE_ENABLED=true.
-    if: >
-      github.event_name == 'workflow_dispatch' ||
-      vars.JOB_DISCOVERY_SCHEDULE_ENABLED == 'true'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:

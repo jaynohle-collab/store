@@ -1,10 +1,10 @@
 name: Automatic Job Discovery
 
 # Producer workflow supports a separate keyword-review lane without LLM calls.
-# Default remains gpt until an authorized rollout changes AUTO_DISCOVERY_MODE.
+# Scheduled collection uses keyword mode; manual GPT remains available explicitly.
 # Keyword mode requires migration 019/server deployment and a private policy secret.
-# Initial keyword rollout is manual-only and requires a separate explicit opt-in.
-# Repository mode variables alone cannot activate keyword collection.
+# Scheduled keyword rollout follows the successful one-company canary.
+# Existing schedule enable switch remains the kill switch; manual activation stays explicit.
 #
 # Scheduled runs require repository variable:
 #   AUTO_DISCOVERY_SCHEDULE_ENABLED=true
@@ -68,10 +68,10 @@ jobs:
     timeout-minutes: 60
     env:
       JOB_PERSISTENCE_MODE: remote
-      AUTO_DISCOVERY_MODE: ${{ github.event.inputs.mode || vars.AUTO_DISCOVERY_MODE || 'gpt' }}
-      # Do not source this guard from repository variables. Scheduled runs are
-      # deliberately blocked in keyword mode until a separate rollout change.
-      KEYWORD_REVIEW_ACTIVATION_APPROVED: ${{ github.event_name == 'workflow_dispatch' && inputs.activate_keyword_review == true && 'true' || 'false' }}
+      AUTO_DISCOVERY_MODE: ${{ github.event_name == 'schedule' && 'keyword' || github.event.inputs.mode || vars.AUTO_DISCOVERY_MODE || 'keyword' }}
+      # Scheduled keyword mode was verified by the isolated production canary.
+      # Manual keyword runs continue to require explicit opt-in.
+      KEYWORD_REVIEW_ACTIVATION_APPROVED: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.activate_keyword_review == true)) && 'true' || 'false' }}
       KEYWORD_REVIEW_POLICY_JSON: ${{ secrets.KEYWORD_REVIEW_POLICY_JSON }}
       KEYWORD_REVIEW_PROFILE_ID: ${{ vars.KEYWORD_REVIEW_PROFILE_ID || '' }}
       JOB_MCP_URL: https://jay-job-mcp.vercel.app/api/mcp
@@ -80,24 +80,24 @@ jobs:
       AUTH0_SCOPES: jobs:read jobs:write jobs:worker
       AUTH0_CLIENT_ID: ${{ secrets.AUTH0_CLIENT_ID }}
       AUTH0_CLIENT_SECRET: ${{ secrets.AUTH0_CLIENT_SECRET }}
-      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-      CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
-      MISTRAL_API_KEY: ${{ secrets.MISTRAL_API_KEY }}
-      SAMBANOVA_API_KEY: ${{ secrets.SAMBANOVA_API_KEY }}
-      NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
-      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-      GITHUB_MODELS_TOKEN: ${{ secrets.GITHUB_MODELS_TOKEN }}
+      GEMINI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.mode || vars.AUTO_DISCOVERY_MODE || 'keyword') == 'gpt' && secrets.GEMINI_API_KEY || '' }}
+      GROQ_API_KEY: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.mode || vars.AUTO_DISCOVERY_MODE || 'keyword') == 'gpt' && secrets.GROQ_API_KEY || '' }}
+      CEREBRAS_API_KEY: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.mode || vars.AUTO_DISCOVERY_MODE || 'keyword') == 'gpt' && secrets.CEREBRAS_API_KEY || '' }}
+      MISTRAL_API_KEY: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.mode || vars.AUTO_DISCOVERY_MODE || 'keyword') == 'gpt' && secrets.MISTRAL_API_KEY || '' }}
+      SAMBANOVA_API_KEY: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.mode || vars.AUTO_DISCOVERY_MODE || 'keyword') == 'gpt' && secrets.SAMBANOVA_API_KEY || '' }}
+      NVIDIA_API_KEY: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.mode || vars.AUTO_DISCOVERY_MODE || 'keyword') == 'gpt' && secrets.NVIDIA_API_KEY || '' }}
+      OPENROUTER_API_KEY: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.mode || vars.AUTO_DISCOVERY_MODE || 'keyword') == 'gpt' && secrets.OPENROUTER_API_KEY || '' }}
+      GITHUB_MODELS_TOKEN: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.mode || vars.AUTO_DISCOVERY_MODE || 'keyword') == 'gpt' && secrets.GITHUB_MODELS_TOKEN || '' }}
       AUTO_DISCOVERY_PROVIDER_ORDER: ${{ vars.AUTO_DISCOVERY_PROVIDER_ORDER || '' }}
-      OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      OPENAI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.mode || vars.AUTO_DISCOVERY_MODE || 'keyword') == 'gpt' && secrets.OPENAI_API_KEY || '' }}
+      ANTHROPIC_API_KEY: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.mode || vars.AUTO_DISCOVERY_MODE || 'keyword') == 'gpt' && secrets.ANTHROPIC_API_KEY || '' }}
       ANTHROPIC_MODEL: claude-haiku-5-5
       # Independent opt-in, plus server-side daily/monthly guards. Key alone is inert.
-      HAIKU_PAID_EXECUTION_APPROVED: ${{ vars.HAIKU_PAID_EXECUTION_APPROVED || 'false' }}
+      HAIKU_PAID_EXECUTION_APPROVED: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.mode || vars.AUTO_DISCOVERY_MODE || 'keyword') == 'gpt' && vars.HAIKU_PAID_EXECUTION_APPROVED || 'false' }}
       GEMINI_MODEL: ${{ vars.GEMINI_MODEL || 'gemini-3.6-flash' }}
       GROQ_MODEL: ${{ vars.GROQ_MODEL || '' }}
       # Free tiers only unless this repository variable is set to true (OpenAI is paid).
-      AUTO_DISCOVERY_ALLOW_PAID_PROVIDERS: ${{ vars.AUTO_DISCOVERY_ALLOW_PAID_PROVIDERS || 'false' }}
+      AUTO_DISCOVERY_ALLOW_PAID_PROVIDERS: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.mode || vars.AUTO_DISCOVERY_MODE || 'keyword') == 'gpt' && vars.AUTO_DISCOVERY_ALLOW_PAID_PROVIDERS || 'false' }}
       AUTO_DISCOVERY_WORKER_IDENTITY: github-actions
       # New per-run limit names win; legacy repository variables remain honored.
       AUTO_DISCOVERY_MAX_COMPANIES_PER_RUN: ${{ github.event.inputs.max_companies || vars.AUTO_DISCOVERY_MAX_COMPANIES_PER_RUN || vars.AUTO_DISCOVERY_MAX_COMPANIES || '5' }}
@@ -119,14 +119,14 @@ jobs:
         env:
           AUTH0_CLIENT_ID: ${{ secrets.AUTH0_CLIENT_ID }}
           AUTH0_CLIENT_SECRET: ${{ secrets.AUTH0_CLIENT_SECRET }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-          OTHER_FREE_LLM: ${{ secrets.CEREBRAS_API_KEY }}${{ secrets.MISTRAL_API_KEY }}${{ secrets.SAMBANOVA_API_KEY }}${{ secrets.NVIDIA_API_KEY }}${{ secrets.OPENROUTER_API_KEY }}${{ github.token }}
+          GEMINI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.mode || vars.AUTO_DISCOVERY_MODE || 'keyword') == 'gpt' && secrets.GEMINI_API_KEY || '' }}
+          GROQ_API_KEY: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.mode || vars.AUTO_DISCOVERY_MODE || 'keyword') == 'gpt' && secrets.GROQ_API_KEY || '' }}
+          OPENAI_API_KEY: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.mode || vars.AUTO_DISCOVERY_MODE || 'keyword') == 'gpt' && secrets.OPENAI_API_KEY || '' }}
+          OTHER_FREE_LLM: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.mode || vars.AUTO_DISCOVERY_MODE || 'keyword') == 'gpt' && secrets.CEREBRAS_API_KEY || '' }}${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.mode || vars.AUTO_DISCOVERY_MODE || 'keyword') == 'gpt' && secrets.MISTRAL_API_KEY || '' }}${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.mode || vars.AUTO_DISCOVERY_MODE || 'keyword') == 'gpt' && secrets.SAMBANOVA_API_KEY || '' }}${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.mode || vars.AUTO_DISCOVERY_MODE || 'keyword') == 'gpt' && secrets.NVIDIA_API_KEY || '' }}${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.mode || vars.AUTO_DISCOVERY_MODE || 'keyword') == 'gpt' && secrets.OPENROUTER_API_KEY || '' }}${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.mode || vars.AUTO_DISCOVERY_MODE || 'keyword') == 'gpt' && github.token || '' }}
         run: |
           set -euo pipefail
           if [ "${AUTO_DISCOVERY_MODE}" = "keyword" ] && [ "${KEYWORD_REVIEW_ACTIVATION_APPROVED}" != "true" ]; then
-            echo "Keyword review is disabled; an explicitly approved manual canary is required"
+            echo "Keyword review is disabled; manual keyword runs require explicit activation"
             exit 1
           fi
           missing=0

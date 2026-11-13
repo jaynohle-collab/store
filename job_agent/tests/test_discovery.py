@@ -177,25 +177,14 @@ class ScheduleSafetyGateTests(unittest.TestCase):
         cls.workflow = path.read_text(encoding="utf-8")
 
     def test_manual_dispatch_is_not_gated(self):
-        self.assertIn("workflow_dispatch", self.workflow)
-        self.assertIn("github.event_name == 'workflow_dispatch'", self.workflow)
-        # Manual path is OR'd ahead of the schedule variable check.
-        dispatch_idx = self.workflow.index("github.event_name == 'workflow_dispatch'")
-        enabled_idx = self.workflow.index(
-            "vars.JOB_DISCOVERY_SCHEDULE_ENABLED == 'true'"
-        )
-        self.assertLess(dispatch_idx, enabled_idx)
+        self.assertIn("workflow_dispatch:", self.workflow)
+        self.assertIn("if: github.event_name == 'workflow_dispatch'", self.workflow)
 
-    def test_scheduled_execution_requires_variable(self):
-        self.assertIn("JOB_DISCOVERY_SCHEDULE_ENABLED", self.workflow)
-        self.assertIn("vars.JOB_DISCOVERY_SCHEDULE_ENABLED == 'true'", self.workflow)
-        self.assertRegex(
-            self.workflow,
-            r"if:\s*>\s*\n\s*github\.event_name == 'workflow_dispatch' \|\|\s*\n"
-            r"\s*vars\.JOB_DISCOVERY_SCHEDULE_ENABLED == 'true'",
-        )
-        # Cron time unchanged.
-        self.assertIn('cron: "0 15 * * *"', self.workflow)
+    def test_legacy_ai_schedule_removed(self):
+        self.assertNotIn("schedule:", self.workflow)
+        self.assertNotIn("cron:", self.workflow)
+        self.assertNotIn("vars.JOB_DISCOVERY_SCHEDULE_ENABLED", self.workflow)
+        self.assertIn("python -m job_agent.examples.automated_daily_run", self.workflow)
 
 
 class OpenAIDiscoveryClientTests(unittest.TestCase):

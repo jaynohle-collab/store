@@ -304,9 +304,9 @@ class KeywordPolicyLoadingTests(unittest.TestCase):
 
 
 class KeywordWorkflowActivationTests(unittest.TestCase):
-    def test_manual_only_gate_precedes_source_expansion_and_does_not_fallback(self):
+    def test_approved_schedule_and_manual_gate_precede_expansion_without_fallback(self):
         workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/automatic-job-discovery.yml").read_text()
-        binding = "KEYWORD_REVIEW_ACTIVATION_APPROVED: ${{ github.event_name == 'workflow_dispatch' && inputs.activate_keyword_review == true && 'true' || 'false' }}"
+        binding = "KEYWORD_REVIEW_ACTIVATION_APPROVED: ${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.activate_keyword_review == true)) && 'true' || 'false' }}"
         self.assertIn(binding, workflow)
         self.assertRegex(workflow, r"activate_keyword_review:\n(?:[^\n]*\n){1,4}\s+default: false")
         self.assertNotIn("vars.KEYWORD_REVIEW_ACTIVATION_APPROVED", workflow)
@@ -314,7 +314,7 @@ class KeywordWorkflowActivationTests(unittest.TestCase):
         verify = workflow.split("      - name: Verify required secrets are present\n", 1)[1]
         script = verify.split("        run: |\n", 1)[1].split("\n      - name:", 1)[0]
         script = re.sub(r"^          ", "", script, flags=re.MULTILINE)
-        self.assertLess(workflow.index("explicitly approved manual canary"), workflow.index("- name: Expand and verify discovery companies"))
+        self.assertLess(workflow.index("manual keyword runs require explicit activation"), workflow.index("- name: Expand and verify discovery companies"))
         for approval in ("", "false", "1", "yes", "TRUE", " true", "true ", "true"):
             with self.subTest(approval=approval):
                 result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, env={
@@ -326,6 +326,48 @@ class KeywordWorkflowActivationTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0 if approval == "true" else 1)
                 if approval != "true":
                     self.assertIn("Keyword review is disabled", result.stdout)
+
+
+    def test_scheduled_mode_credentials_and_manual_controls(self):
+        workflow = (Path(__file__).resolve().parents[2] / ".github/workflows/automatic-job-discovery.yml").read_text()
+        self.assertIn('cron: "17 4,6,8,10,16,20 * * *"', workflow)
+        self.assertIn("vars.AUTO_DISCOVERY_SCHEDULE_ENABLED == 'true'", workflow)
+        self.assertIn("group: automatic-job-discovery", workflow)
+
+        def expression(key):
+            line = next(line for line in workflow.splitlines() if line.strip().startswith(key + ":"))
+            return line.split("${{", 1)[1].rsplit("}}", 1)[0].strip()
+
+        def resolve(expr, event, mode, repository_mode, approved):
+            values = {
+                "github.event_name": event, "github.event.inputs.mode": mode,
+                "vars.AUTO_DISCOVERY_MODE": repository_mode,
+                "inputs.activate_keyword_review": approved,
+            }
+            expr = re.sub(r"(?:github|vars|inputs|secrets)\.[A-Za-z0-9_.]+",
+                          lambda match: repr(values.get(match.group(), "credential")), expr)
+            expr = re.sub(r"\btrue\b", "True", expr)
+            # String 'true' values remain truthy; compare activation against 'True'.
+            expr = expr.replace("&&", " and ").replace("||", " or ")
+            return eval(expr, {"__builtins__": {}}, {})
+
+        keys = ("GEMINI_API_KEY", "GROQ_API_KEY", "CEREBRAS_API_KEY", "MISTRAL_API_KEY",
+                "SAMBANOVA_API_KEY", "NVIDIA_API_KEY", "OPENROUTER_API_KEY",
+                "GITHUB_MODELS_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY")
+        for event in ("schedule", "workflow_dispatch"):
+            for mode in ("", "gpt", "keyword"):
+                for repository_mode in ("", "gpt", "keyword"):
+                    for approved in (False, True):
+                        args = (event, mode, repository_mode, approved)
+                        effective = resolve(expression("AUTO_DISCOVERY_MODE"), *args)
+                        self.assertEqual(effective, "keyword" if event == "schedule" else mode or repository_mode or "keyword")
+                        activation = resolve(expression("KEYWORD_REVIEW_ACTIVATION_APPROVED"), *args)
+                        self.assertEqual(activation, "True" if event == "schedule" or approved else "false")
+                        for key in keys:
+                            self.assertEqual(resolve(expression(key), *args), "credential" if effective == "gpt" else "")
+                        if effective == "keyword":
+                            for key in ("HAIKU_PAID_EXECUTION_APPROVED", "AUTO_DISCOVERY_ALLOW_PAID_PROVIDERS"):
+                                self.assertEqual(resolve(expression(key), *args), "false")
 
 
 if __name__ == "__main__":

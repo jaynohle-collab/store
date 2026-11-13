@@ -1,0 +1,100 @@
+name: Keyword Discovery Requested Once
+on:
+  push:
+    branches: [dot/keyword-now-20261113]
+    paths: [.github/workflows/keyword-discovery-requested-once.yml]
+permissions:
+  contents: read
+concurrency:
+  group: automatic-job-discovery
+  cancel-in-progress: false
+jobs:
+  canary:
+    if: github.run_attempt == 1 && github.event.head_commit.message == 'Run requested keyword discovery now'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: b992cadbe2e5d2ad82e2781166ca5abad121a287
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run bounded keyword-only discovery
+        env:
+          JOB_PERSISTENCE_MODE: remote
+          AUTO_DISCOVERY_MODE: keyword
+          KEYWORD_REVIEW_ACTIVATION_APPROVED: 'true'
+          KEYWORD_REVIEW_POLICY_JSON: ${{ secrets.KEYWORD_REVIEW_POLICY_JSON }}
+          KEYWORD_REVIEW_PROFILE_ID: ${{ vars.KEYWORD_REVIEW_PROFILE_ID || '' }}
+          JOB_MCP_URL: https://jay-job-mcp.vercel.app/api/mcp
+          AUTH0_TOKEN_URL: https://jay-job.us.auth0.com/oauth/token
+          AUTH0_AUDIENCE: https://jay-job-mcp-michaeltchueng-2909s-projects.vercel.app/api/mcp
+          AUTH0_SCOPES: jobs:read jobs:write jobs:worker
+          AUTH0_CLIENT_ID: ${{ secrets.AUTH0_CLIENT_ID }}
+          AUTH0_CLIENT_SECRET: ${{ secrets.AUTH0_CLIENT_SECRET }}
+          AUTO_DISCOVERY_MAX_COMPANIES_PER_RUN: ${{ vars.AUTO_DISCOVERY_MAX_COMPANIES_PER_RUN || vars.AUTO_DISCOVERY_MAX_COMPANIES || '5' }}
+          AUTO_DISCOVERY_MAX_LISTINGS_PER_COMPANY: ${{ vars.AUTO_DISCOVERY_MAX_LISTINGS_PER_COMPANY || vars.AUTO_DISCOVERY_MAX_CANDIDATES_PER_COMPANY || '100' }}
+        run: |
+          python - <<'PY'
+          import asyncio, json, logging, os
+          from collections import Counter
+          from job_agent.auto_discovery.limits import DiscoveryLimits
+          from job_agent.examples.automatic_discovery_run import load_keyword_policy
+          from job_agent.integrations.lifecycle_store import RemoteLifecycleStore
+          from job_agent.profile.identity import identity_of, load_active_profile
+          from job_agent.review.pipeline import KeywordDiscoveryPipeline
+          logging.getLogger().setLevel(logging.CRITICAL)
+          allowed = {
+              "start_automatic_discovery_run", "claim_due_discovery_companies",
+              "check_discovery_candidates", "upsert_keyword_review_candidates",
+              "complete_discovery_company_run", "fail_discovery_company_run",
+              "finish_automatic_discovery_run",
+          }
+          counts = Counter()
+          limits = DiscoveryLimits.from_env()
+          class CanaryStore(RemoteLifecycleStore):
+              async def _call(self, name, arguments=None):
+                  if name not in allowed:
+                      raise RuntimeError("Forbidden canary operation")
+                  if name == "claim_due_discovery_companies" and arguments.get("limit") != limits.max_companies:
+                      raise RuntimeError("Invalid company bound")
+                  counts[name] += 1
+                  return await super()._call(name, arguments)
+          async def main():
+              for key in ("AUTH0_CLIENT_ID", "AUTH0_CLIENT_SECRET", "KEYWORD_REVIEW_POLICY_JSON"):
+                  if not os.environ.get(key):
+                      print("Missing required runtime setting: " + key)
+                      return 2
+              policy = load_keyword_policy()
+              profile = os.environ.get("KEYWORD_REVIEW_PROFILE_ID", "").strip() or identity_of(load_active_profile()).profile_id
+              pipeline = KeywordDiscoveryPipeline(CanaryStore(), policy=policy, profile_id=profile, max_companies=limits.max_companies, worker_identity="keyword-requested")
+              result = await pipeline.run()
+              summary = {
+                  "company_limit": limits.max_companies,
+                  "listing_window_per_company": limits.max_listings_per_company,
+                  "companies_claimed": result.companies_claimed,
+                  "companies_completed": result.companies_completed,
+                  "companies_failed": result.companies_failed,
+                  "listing_appearances": result.candidates_listed,
+                  "review_saved": result.review_saved,
+                  "new_to_review": result.review_new,
+                  "seen_before": result.review_updated,
+                  "filtered": result.review_filtered,
+                  "needs_checking": result.review_needs_checking,
+                  "errors": result.errors,
+                  "mcp_operations": dict(counts),
+                  "model_calls": 0,
+                  "application_or_inbox_operations": 0,
+              }
+              print("KEYWORD_DISCOVERY_RESULT=" + json.dumps(summary, sort_keys=True))
+              return 1 if result.errors or result.companies_failed or result.companies_completed != result.companies_claimed else 0
+          try:
+              raise SystemExit(asyncio.run(main()))
+          except Exception as exc:
+              print("Canary failed: " + type(exc).__name__ + "; private values omitted")
+              raise SystemExit(2)
+          PY

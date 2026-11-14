@@ -41,7 +41,7 @@ limits, GPT admission contracts, lifecycle rules and spending controls.
 4. Run read-only identity/application preflight. Ignore historical GPT rejection
    and GPT-skip fields for keyword admission. A preflight failure does not
    bypass access control or silently fall back to another path.
-5. Send all distinct records in the bounded scan to the new review MCP tool in
+5. Send all valid distinct records actually returned by the bounded adapters to the review MCP tool in
    chunks of 100, including an inspectable filtered audit bucket. No top-K
    selection or LLM-evaluation budget limits review-list admission.
 6. Store source metadata, matched terms, policy identity, first/last collection
@@ -196,10 +196,13 @@ unchanged; AI assistance would need its own bounded activation and policy flow.
 
 - Source collection and database hosting still use their normal infrastructure
   quotas/costs; zero model calls does not mean unlimited or cost-free discovery.
-- Scans are still bounded by current company/listing limits. Workday and
-  SmartRecruiters first-page limits are not solved here; a rotating local window
-  cannot reach inventory an adapter never fetched. Expand sources/pagination
-  separately with rate-limit and source-quality checks.
+- All valid fetched listings are now retained, with no second 100-row rotating
+  storage window. Identity/history reads and review writes remain in chunks of
+  at most 100. Invalid rows are counted and excluded; duplicates share records.
+  Existing company limits, HTTP response limits, source pagination limits, and
+  the review validator's 20,000-row safety limit remain. Oversized inventories
+  fail visibly rather than being silently truncated. This does not fetch or
+  backfill inventory an adapter never returned; expand source pagination separately.
 - The conservative country parser intentionally leaves city/state and unfamiliar
   country strings unknown. Keyword matching can misread negated skills, boilerplate,
   unusual titles and mixed listings; the user makes the final judgment.

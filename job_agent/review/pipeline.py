@@ -114,24 +114,17 @@ class KeywordDiscoveryPipeline:
                 adapter.max_listings = self.limits.max_listings_per_company
             listed = adapter.list_jobs(company)
             self.metrics.candidates_listed += len(listed)
-            # Rotates only already-fetched inventory. Does not claim to solve
-            # upstream first-page limits in individual ATS adapters.
+            # Preserve every listing the bounded adapter actually returned.
+            # Do not add a second per-company window that silently defers rows.
+            # Source pagination, HTTP response limits and company caps remain.
             listed.sort(key=lambda c: (c.source, c.external_job_id, c.url, c.title))
-            raw_company = company.raw.get("company", company.raw)
-            stats = raw_company.get("stats") or {}
-            scan = stats.get("keyword_listing_scan") or {}
-            offset = scan.get("next_offset", 0)
-            if type(offset) is not int or not 0 <= offset < len(listed):
-                offset = 0
-            window = (listed[offset:] + listed[:offset])[:self.limits.max_listings_per_company]
-            next_offset = (offset + len(window)) % len(listed) if listed else 0
-            snapshots = [asdict(c) for c in window]
+            snapshots = [asdict(c) for c in listed]
             # Structural validation precedes preflight; never query arbitrary
             # invalid links or silently guess candidate identity.
             report = review_candidates(snapshots, self.policy)
             invalid_indices = {r["input_index"] for r in report["invalid_rows"]}
             candidates = []
-            for index, candidate in enumerate(window):
+            for index, candidate in enumerate(listed):
                 if index in invalid_indices:
                     continue
                 # Existing preflight has narrower identity lengths than review
@@ -195,7 +188,8 @@ class KeywordDiscoveryPipeline:
                     "run_id": company.run_id, "worker_identity": self.worker_identity,
                     "success": True, "metrics": {"discovery_mode": "keyword",
                     "listed": len(listed), "review_saved": company_saved,
-                    "keyword_listing_scan": {"next_offset": next_offset}}})
+                    "keyword_listing_scan": {"next_offset": 0},
+                    "review_inventory_scope": "all_fetched"}})
             self.metrics.companies_completed += 1
         except Exception as exc:
             self.metrics.companies_failed += 1

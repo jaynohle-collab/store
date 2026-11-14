@@ -122,18 +122,20 @@ class KeywordPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(next(p for name, p in store.calls if name == "finish")["metrics"]["discovery_mode"], "keyword")
 
     async def test_chunks_and_source_limits(self):
-        store, metrics = await self.run_pipeline(rows=candidates(253), limits=DiscoveryLimits(max_listings_per_company=500))
+        store, metrics = await self.run_pipeline(rows=candidates(253), limits=DiscoveryLimits(max_listings_per_company=100))
         self.assertEqual(metrics.review_saved, 253)
         self.assertEqual([len(p["candidates"]) for name, p in store.calls if name == "upsert"], [100, 100, 53])
         self.assertEqual([len(p["candidates"]) for name, p in store.calls if name == "preflight"], [100, 100, 53])
 
-    async def test_window_rotation_and_no_top_three(self):
+    async def test_all_fetched_inventory_saved_despite_old_window_offset(self):
         store = Store()
         store.offset = 20
         store, metrics = await self.run_pipeline(store=store, rows=candidates(200), limits=DiscoveryLimits(max_listings_per_company=100))
-        self.assertEqual(metrics.review_saved, 100)
+        self.assertEqual(metrics.review_saved, 200)
+        self.assertEqual([len(p["candidates"]) for name, p in store.calls if name == "upsert"], [100, 100])
         completed = next(p for name, p in store.calls if name == "complete")
-        self.assertEqual(completed["metrics"]["keyword_listing_scan"]["next_offset"], 120)
+        self.assertEqual(completed["metrics"]["keyword_listing_scan"]["next_offset"], 0)
+        self.assertEqual(completed["metrics"]["review_inventory_scope"], "all_fetched")
 
     async def test_applied_history_filtered_but_no_application_write(self):
         store = Store()

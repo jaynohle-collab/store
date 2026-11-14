@@ -39,6 +39,7 @@ export async function listKeywordReviewCandidates(input: z.input<typeof listKeyw
         AND (${p.q ?? null}::text IS NULL OR strpos(lower(concat_ws(' ',snapshot->>'title',snapshot->>'company',snapshot->>'location_text')),lower(${p.q ?? ""}))>0)
         AND (${p.newOnly ?? false}::boolean=false OR seen_count=1)
         AND (${p.freshSince ?? null}::timestamptz IS NULL OR first_seen_at>=${p.freshSince ?? null}::timestamptz)
+        AND (${p.freshBefore ?? null}::timestamptz IS NULL OR first_seen_at<${p.freshBefore ?? null}::timestamptz)
       ORDER BY first_seen_at DESC,id DESC LIMIT ${p.limit + 1} OFFSET ${p.offset}`;
     const candidates = rows.slice(0, p.limit).map(row => ({
       ...(row.snapshot as KeywordReviewCandidate), id: String(row.id), profile_id: String(row.profile_id),
@@ -48,4 +49,21 @@ export async function listKeywordReviewCandidates(input: z.input<typeof listKeyw
     }));
     return { candidates, nextOffset: rows.length > p.limit ? p.offset+p.limit : null, available: true };
   } catch (error) { if (missingMigration(error)) return { candidates: [], nextOffset: null, available: false }; throw error; }
+}
+
+/** One consistent query across all pages, never a partial clipboard export. */
+export async function listKeywordReviewLinks(input: z.input<typeof listKeywordReviewCandidatesSchema> = {}, sql: Sql = getSql()): Promise<string[]> {
+  const p = listKeywordReviewCandidatesSchema.parse(input);
+  p.profileId = p.profileId ?? (process.env.KEYWORD_REVIEW_PROFILE_ID?.trim() || getActiveProfileId());
+  const rows = await sql`
+    SELECT snapshot->>'url' AS url FROM keyword_review_candidates
+    WHERE profile_id=${p.profileId}
+      AND ((${p.bucket ?? null}::text IS NULL AND snapshot->>'bucket'<>'filtered') OR snapshot->>'bucket'=${p.bucket ?? null})
+      AND (${p.q ?? null}::text IS NULL OR strpos(lower(concat_ws(' ',snapshot->>'title',snapshot->>'company',snapshot->>'location_text')),lower(${p.q ?? ""}))>0)
+      AND (${p.newOnly ?? false}::boolean=false OR seen_count=1)
+      AND (${p.freshSince ?? null}::timestamptz IS NULL OR first_seen_at>=${p.freshSince ?? null}::timestamptz)
+      AND (${p.freshBefore ?? null}::timestamptz IS NULL OR first_seen_at<${p.freshBefore ?? null}::timestamptz)
+    ORDER BY first_seen_at DESC,id DESC LIMIT 20001`;
+  if (rows.length > 20000) throw new Error("EXPORT_TOO_LARGE");
+  return rows.map(row => String(row.url ?? ""));
 }

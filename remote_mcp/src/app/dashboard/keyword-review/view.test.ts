@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseReviewFilters, reviewPageHref, safeListingHref, reviewDate } from "./view";
+import { parseReviewFilters, reviewPageHref, safeListingHref, reviewDate, reviewQuery } from "./view";
 describe("keyword review view helpers", () => {
   it("validates filters", () => {
     expect(parseReviewFilters({ q: "  engineer  ", bucket: "stronger", new: "1", offset: "50" })).toEqual({ q: "engineer", bucket: "stronger", newOnly: true, offset: 50 });
@@ -24,5 +24,16 @@ describe("keyword review view helpers", () => {
     expect(reviewDate(null)).toBe("Unknown");
     expect(reviewDate("not a date")).toBe("Unknown");
     expect(reviewDate("2026-11-12T10:00:00Z")).toBe("2026-11-12 10:00 UTC");
+  });
+});
+
+describe("collection date filters", () => {
+  it("keeps inclusive UTC dates through pagination and query conversion", () => {
+    const f = parseReviewFilters({ from: "2026-11-13", to: "2026-11-14" });
+    expect(parseReviewFilters(Object.fromEntries(new URL(reviewPageHref(f, 50), "https://test.invalid").searchParams))).toEqual({ ...f, offset: 50 });
+    expect(reviewQuery(f)).toEqual({ q: "", bucket: undefined, newOnly: false, offset: 0, freshSince: "2026-11-13T00:00:00.000Z", freshBefore: "2026-11-15T00:00:00.000Z" });
+  });
+  it("rejects impossible, repeated, and reversed dates instead of widening export", () => {
+    for (const sp of [{ from: "2026-02-30" }, { to: ["2026-01-01", "2026-01-02"] }, { from: "2026-02-02", to: "2026-02-01" }, { from: "yesterday" }]) expect(() => parseReviewFilters(sp)).toThrow();
   });
 });

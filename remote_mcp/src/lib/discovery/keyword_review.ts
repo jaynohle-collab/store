@@ -50,6 +50,7 @@ export const listKeywordReviewCandidatesSchema = z.object({
   profileId: text.optional(), q: z.string().trim().max(200).optional(), bucket: keywordReviewBucketSchema.optional(),
   newOnly: z.union([z.boolean(), z.enum(["true", "false"]).transform(v => v === "true")]).optional(),
   freshSince: z.iso.datetime({ offset: true }).optional(),
+  freshBefore: z.iso.datetime({ offset: true }).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
   offset: z.coerce.number().int().min(0).max(100000).default(0),
 }).strict();

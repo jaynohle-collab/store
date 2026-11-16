@@ -19,6 +19,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import parse_qs, urlsplit
 
 from job_agent.auto_discovery.adapters.registry import get_adapter
 from job_agent.auto_discovery.http_client import SafeHttpClient
@@ -46,7 +47,7 @@ _LEVER_URL_RE = re.compile(
     re.IGNORECASE,
 )
 _WORKDAY_URL_RE = re.compile(
-    r"^https://([a-z0-9][a-z0-9-]{0,62})\.(wd\d{1,2})\.myworkdayjobs\.com/"
+    r"^https://([a-z0-9][a-z0-9-]{0,62})\.(wd[0-9]{1,3})\.myworkdayjobs\.com/"
     r"(?:[a-z]{2}-[A-Z]{2}/)?([A-Za-z0-9_-]{1,100})/job/",
 )
 _SMARTRECRUITERS_URL_RE = re.compile(
@@ -78,9 +79,46 @@ def slugify_company_key(value: str) -> str:
     return slug[:64].strip("-")
 
 
+def _greenhouse_embed_org(url: str) -> str | None:
+    """Accept only unambiguous official embedded application URLs."""
+    # urlsplit removes some control characters; reject them before parsing.
+    if any(ord(char) < 32 or ord(char) == 127 for char in url):
+        return None
+    try:
+        parsed = urlsplit(url)
+        if (
+            parsed.scheme != "https"
+            or parsed.netloc.lower() not in {"boards.greenhouse.io", "job-boards.greenhouse.io"}
+            or parsed.path != "/embed/job_app"
+            or re.search(r"%(?![0-9a-fA-F]{2})", parsed.query)
+        ):
+            return None
+        query = parse_qs(
+            parsed.query, keep_blank_values=True, strict_parsing=True,
+            errors="strict", max_num_fields=32,
+        )
+    except (ValueError, UnicodeError):
+        return None
+    # Case variants must not disguise additional identity parameters.
+    if any(key.lower() in {"for", "token"} and key not in {"for", "token"} for key in query):
+        return None
+    orgs, tokens = query.get("for", []), query.get("token", [])
+    if (
+        len(orgs) != 1
+        or len(tokens) != 1
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,99}", orgs[0])
+        or not re.fullmatch(r"[0-9]+", tokens[0])
+    ):
+        return None
+    return orgs[0].lower()
+
+
 def parse_ats_posting_url(url: str) -> tuple[str, str] | None:
     """Return ``(provider, ats_org_id)`` for an official ATS posting URL, else None."""
     raw = (url or "").strip()
+    embedded_org = _greenhouse_embed_org(raw)
+    if embedded_org is not None:
+        return "greenhouse", embedded_org
     for provider, pattern in (
         ("greenhouse", _GREENHOUSE_URL_RE),
         ("ashby", _ASHBY_URL_RE),

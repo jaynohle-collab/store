@@ -50,6 +50,70 @@ class ParseTests(unittest.TestCase):
             ("workday", "acme|External|acme.wd5.myworkdayjobs.com"),
         )
 
+    def test_greenhouse_embedded_urls(self):
+        for host in ("boards.greenhouse.io", "job-boards.greenhouse.io"):
+            for query in ("for=Acme_Inc&token=123", "token=123&for=Acme_Inc&gh_src=abc"):
+                with self.subTest(host=host, query=query):
+                    self.assertEqual(
+                        parse_ats_posting_url(f"https://{host}/embed/job_app?{query}"),
+                        ("greenhouse", "acme_inc"),
+                    )
+
+    def test_rejects_invalid_greenhouse_embedded_queries(self):
+        for query in (
+            "", "for=acme", "token=123", "for=&token=123", "for=acme&token=",
+            "for=acme&for=other&token=123", "for=acme&for=acme&token=123",
+            "for=acme&%66or=other&token=123", "for=acme&FOR=other&token=123",
+            "for=acme&token=123&token=456", "for=acme&token=abc",
+            "for=acme&token=１２３", "for=acme&token=-123",
+            "for=../acme&token=123", "for=acme%2Fother&token=123",
+            "for=acme%26for%3Dother&token=123", "for=acme+inc&token=123",
+            "for=acme%00&token=123", "for=acme%0A&token=123",
+            "for=acme%ZZ&token=123", "for=%FF&token=123",
+            "for=acme&token=123&broken", "for=acme;token=123",
+            "for=" + "a" * 101 + "&token=123",
+        ):
+            with self.subTest(query=query):
+                self.assertIsNone(parse_ats_posting_url(
+                    f"https://boards.greenhouse.io/embed/job_app?{query}"
+                ))
+
+    def test_rejects_deceptive_greenhouse_embed_locations(self):
+        for base in (
+            "http://boards.greenhouse.io/embed/job_app",
+            "https://boards.greenhouse.io.evil.com/embed/job_app",
+            "https://evil.com/boards.greenhouse.io/embed/job_app",
+            "https://boards.greenhouse.io@evil.com/embed/job_app",
+            "https://evil.com@boards.greenhouse.io/embed/job_app",
+            "https://boards.greenhouse.io:443/embed/job_app",
+            "https://boards.greenhouse.io./embed/job_app",
+            "https://other.greenhouse.io/embed/job_app",
+            "https://boards.greenhouse.io/embed/job_app/extra",
+            "https://boards.greenhouse.io/embed/job_app/",
+            "https://boards.greenhouse.io/embed/%6Aob_app",
+            "https://boards.greenhouse.io/embed/job_\tapp",
+        ):
+            with self.subTest(base=base):
+                self.assertIsNone(parse_ats_posting_url(base + "?for=acme&token=123"))
+
+    def test_workday_shards(self):
+        for shard in ("wd1", "wd12", "wd504", "wd108"):
+            for locale in ("", "en-US/"):
+                with self.subTest(shard=shard, locale=locale):
+                    host = f"acme.{shard}.myworkdayjobs.com"
+                    self.assertEqual(
+                        parse_ats_posting_url(f"https://{host}/{locale}External/job/Remote/R1"),
+                        ("workday", f"acme|External|{host}"),
+                    )
+        for host in (
+            "acme.wd.myworkdayjobs.com", "acme.wd1234.myworkdayjobs.com",
+            "acme.wd５０４.myworkdayjobs.com", "acme.wd504.myworkdayjobs.com.evil.com",
+            "acme.wd504.myworkdayjobs.com@evil.com",
+            "evil.com@acme.wd504.myworkdayjobs.com",
+        ):
+            with self.subTest(host=host):
+                self.assertIsNone(parse_ats_posting_url(f"https://{host}/External/job/R1"))
+
     def test_rejects_non_official_or_ambiguous_urls(self):
         for url in (
             "http://boards.greenhouse.io/acme/jobs/1",
@@ -67,6 +131,8 @@ class ParseTests(unittest.TestCase):
 
     def test_history_candidates_dedupe_and_bound(self):
         hints = [
+            {"url": "https://boards.greenhouse.io/embed/job_app?for=ACME&token=2", "company": "Acme AI"},
+            {"url": "https://job-boards.greenhouse.io/embed/job_app?token=3&for=acme", "company": "Acme AI"},
             {"url": "https://boards.greenhouse.io/acme/jobs/2", "company": "Acme AI"},
             {"url": "https://boards.greenhouse.io/ACME/jobs/1", "company": "Acme AI"},
             {"url": f"https://jobs.ashbyhq.com/beta/{UUID}", "company": "Beta"},
@@ -143,6 +209,33 @@ def _client(handler) -> SafeHttpClient:
 
 
 class VerifyTests(unittest.TestCase):
+    def test_new_url_identities_reach_official_verification_endpoints(self):
+        cases = [(
+            "https://boards.greenhouse.io/embed/job_app?for=Acme_Inc&token=123",
+            "GET", "https://boards-api.greenhouse.io/v1/boards/acme_inc/jobs", {"jobs": []},
+        )]
+        for shard in ("wd1", "wd12", "wd504", "wd108"):
+            host = f"acme.{shard}.myworkdayjobs.com"
+            cases.append((
+                f"https://{host}/en-US/External/job/Remote/R1",
+                "POST", f"https://{host}/wday/cxs/acme/External/jobs",
+                {"jobPostings": [], "total": 0},
+            ))
+        for url, method, endpoint, payload in cases:
+            with self.subTest(url=url):
+                requests = []
+
+                def handler(req):
+                    requests.append((req.method, str(req.url)))
+                    return httpx.Response(200, json=payload)
+
+                candidates = history_candidates([{"url": url, "company": "Acme"}], limit=1)
+                self.assertEqual(len(candidates), 1)
+                with _client(handler) as client:
+                    result = verify_candidate(candidates[0], client)
+                self.assertEqual((result.outcome, result.job_count), ("verified", 0))
+                self.assertEqual(requests, [(method, endpoint)])
+
     def test_verified_with_job_count(self):
         client = _client(lambda req: httpx.Response(200, json={"jobs": [
             {"id": 1, "title": "Engineer", "absolute_url": "https://boards.greenhouse.io/acme/jobs/1",
